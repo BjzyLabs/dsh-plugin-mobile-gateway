@@ -30,7 +30,7 @@
 
 ## 安装插件
 
-前提：已经安装 `dsh` CLI，并能正常启动 `dsh web`。
+前提：已经安装 `dsh` CLI 和 `pnpm`，并能正常启动 `dsh web`。可先执行 `pnpm --version` 确认当前用户的环境能够找到 `pnpm`。
 
 局域网使用只需安装插件：
 
@@ -71,7 +71,7 @@ dsh web
 ## Linux 服务器公网 IP 配对
 
 > [!NOTE]
-> 本文所说的“公网 IP 配对”特指 Linux 服务器。一键公网安装从 `v0.6.4` 开始提供，适用于带固定公网 IPv4 的 Ubuntu/Debian 服务器。服务器需要已经安装 Node.js 和 `dsh` CLI。
+> 本文所说的“公网 IP 配对”特指 Linux 服务器。一键公网安装从 `v0.6.4` 开始提供，适用于带固定公网 IPv4 的 Ubuntu/Debian 服务器。服务器需要已经安装 Node.js、`pnpm` 和 `dsh` CLI；当前尚不支持 CentOS。
 
 ### 1. 准备公网端口
 
@@ -79,7 +79,13 @@ dsh web
 
 ### 2. 一键初始化
 
-在服务器中执行：
+先确认普通 DSH 用户可以直接调用 `pnpm`：
+
+```bash
+pnpm --version
+```
+
+然后使用同一个普通用户执行（不要使用 `root` 或 `sudo npx`）：
 
 ```bash
 npm_config_registry=https://registry.npmjs.org \
