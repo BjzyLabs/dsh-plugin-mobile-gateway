@@ -8,10 +8,13 @@ import { fileURLToPath } from 'node:url'
 import {
   assertPublicIpv4,
   certName,
+  currentPackageSpec,
+  helperService,
   isMainModule,
   nginxHttpConfig,
   nginxTlsConfig,
   parseArgs,
+  pluginInstallArgs,
   renewalService,
   renewalTimer,
 } from '../bin/setup-ip.mjs'
@@ -31,6 +34,12 @@ for (const address of ['', '127.0.0.1', '10.0.0.1', '172.16.0.1', '192.168.1.1',
 }
 
 assert.equal(certName('203.0.113.7'), 'dsh-mobile-gateway-203-0-113-7')
+const packageManifest = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+assert.equal(currentPackageSpec(), `${packageManifest.name}@${packageManifest.version}`)
+assert.deepEqual(pluginInstallArgs('dsh-plugin-mobile-gateway@9.8.7'), [
+  'plugin', '--profile', 'web', 'add', 'dsh-plugin-mobile-gateway@9.8.7',
+  '--config.minimum-release-age-exclude=dsh-plugin-mobile-gateway@9.8.7',
+])
 
 const httpConfig = nginxHttpConfig('203.0.113.7')
 assert.match(httpConfig, /listen 80;/)
@@ -48,6 +57,13 @@ assert.doesNotMatch(tlsConfig, /location \/mgw/)
 assert.match(renewalService(), /certbot renew --quiet/)
 assert.match(renewalService(), /systemctl reload nginx/)
 assert.match(renewalTimer(), /OnCalendar=\*-\*-\* 00,12:00:00/)
+assert.match(helperService(1000), /ExecStart=\/usr\/bin\/python3 .* --uid 1000/)
+assert.match(helperService(1000), /NoNewPrivileges=true/)
+assert.doesNotMatch(helperService(1000), /\/bin\/sh/)
+
+const helperPath = fileURLToPath(new URL('../helper/dsh_mobile_gateway_helper.py', import.meta.url))
+const helperSyntax = spawnSync('python3', ['-c', 'import pathlib,sys; compile(pathlib.Path(sys.argv[1]).read_text(), sys.argv[1], "exec")', helperPath], { encoding: 'utf8' })
+assert.equal(helperSyntax.status, 0, helperSyntax.stderr)
 
 const binPath = fileURLToPath(new URL('../bin/setup-ip.mjs', import.meta.url))
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-gateway-bin-'))

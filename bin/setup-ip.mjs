@@ -18,10 +18,32 @@ const CERTBOT_HOME = '/opt/dsh-mobile-gateway/certbot'
 const CERTBOT = path.join(CERTBOT_HOME, 'bin/certbot')
 const RENEW_SERVICE = '/etc/systemd/system/dsh-mobile-gateway-cert-renew.service'
 const RENEW_TIMER = '/etc/systemd/system/dsh-mobile-gateway-cert-renew.timer'
+const HELPER_SOURCE = fileURLToPath(new URL('../helper/dsh_mobile_gateway_helper.py', import.meta.url))
+const HELPER_INSTALL = '/usr/local/libexec/dsh-mobile-gateway-helper'
+const HELPER_SERVICE = '/etc/systemd/system/dsh-mobile-gateway-helper.service'
+const HELPER_SOCKET = '/run/dsh-mobile-gateway/helper.sock'
+
+function currentPackageSpec() {
+  const manifest = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  if (typeof manifest.name !== 'string' || !manifest.name || typeof manifest.version !== 'string' || !manifest.version) {
+    throw new Error('package manifest is missing name or version')
+  }
+  return `${manifest.name}@${manifest.version}`
+}
+
+function pluginInstallArgs(packageSpec = currentPackageSpec()) {
+  return [
+    'plugin', '--profile', 'web', 'add', packageSpec,
+    `--config.minimum-release-age-exclude=${packageSpec}`,
+  ]
+}
 
 function printHelp() {
   console.log(`Usage:
   dsh-plugin-mobile-gateway setup [--ip <public IPv4>] [--port 3080] [--email <address>] [--yes]
+  dsh-plugin-mobile-gateway init
+  dsh-plugin-mobile-gateway setup-helper
+  dsh-plugin-mobile-gateway remove-helper [--yes]
   dsh-plugin-mobile-gateway status
   dsh-plugin-mobile-gateway remove [--yes]
 
@@ -72,6 +94,112 @@ function writeManagedFile(file, content, mode = 0o644) {
   fs.writeFileSync(temporary, content, { mode })
   fs.renameSync(temporary, file)
   fs.chmodSync(file, mode)
+}
+
+function writeInstalledHelper(source, destination) {
+  if (fs.existsSync(destination)) {
+    const existing = fs.readFileSync(destination, 'utf8')
+    if (!existing.slice(0, 256).includes(MARKER)) {
+      throw new Error(`refusing to overwrite unmanaged file: ${destination}`)
+    }
+  }
+  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o755 })
+  const temporary = `${destination}.tmp-${process.pid}`
+  fs.copyFileSync(source, temporary)
+  fs.chmodSync(temporary, 0o755)
+  fs.renameSync(temporary, destination)
+}
+
+function helperService(uid) {
+  return `${MARKER}
+[Unit]
+Description=DSH mobile gateway privileged configuration helper
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 ${HELPER_INSTALL} --uid ${uid} --socket ${HELPER_SOCKET}
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=dsh-mobile-gateway
+RuntimeDirectoryMode=0755
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/nginx /etc/dsh-mobile-gateway /etc/letsencrypt /var/lib/dsh-mobile-gateway /var/lib/letsencrypt /var/log/letsencrypt /run/dsh-mobile-gateway
+
+[Install]
+WantedBy=multi-user.target
+`
+}
+
+function invokingUserId() {
+  const value = Number(process.env.SUDO_UID)
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error('setup-helper must be run with sudo from the user that runs dsh web')
+  }
+  return value
+}
+
+async function init() {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    throw new Error('init must run as the normal DSH user, without sudo')
+  }
+  if (!commandExists('dsh') || !commandExists('sudo')) {
+    throw new Error('init requires dsh and sudo on PATH')
+  }
+  const packageSpec = currentPackageSpec()
+  run('dsh', pluginInstallArgs(packageSpec))
+  const script = fileURLToPath(import.meta.url)
+  run('sudo', ['env', `PATH=${process.env.PATH || ''}`, process.execPath, script, 'setup-helper'])
+  console.log('\nInitialization completed. Start or restart DSH with: dsh web')
+}
+
+function setupHelper() {
+  assertRoot()
+  const uid = invokingUserId()
+  if (!commandExists('apt-get') || !commandExists('systemctl')) {
+    throw new Error('helper installation currently supports systemd-based Ubuntu/Debian servers only')
+  }
+  run('apt-get', ['update'])
+  run('apt-get', ['install', '-y', 'nginx', 'python3', 'python3-venv'])
+  if (!fs.existsSync(CERTBOT)) {
+    run('python3', ['-m', 'venv', CERTBOT_HOME])
+    run(path.join(CERTBOT_HOME, 'bin/pip'), ['install', '--upgrade', 'pip'])
+  }
+  run(path.join(CERTBOT_HOME, 'bin/pip'), ['install', '--upgrade', 'certbot>=5.4,<6'])
+  for (const directory of [CONFIG_DIR, WEBROOT, '/etc/letsencrypt', '/var/lib/letsencrypt', '/var/log/letsencrypt']) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o755 })
+  }
+  writeInstalledHelper(HELPER_SOURCE, HELPER_INSTALL)
+  writeManagedFile(HELPER_SERVICE, helperService(uid))
+  writeManagedFile(RENEW_SERVICE, renewalService())
+  writeManagedFile(RENEW_TIMER, renewalTimer())
+  run('systemctl', ['daemon-reload'])
+  run('systemctl', ['enable', '--now', path.basename(HELPER_SERVICE)])
+  run('systemctl', ['restart', path.basename(HELPER_SERVICE)])
+  run('systemctl', ['enable', '--now', path.basename(RENEW_TIMER)])
+  console.log(`\nHelper installed for uid ${uid}. Public access can now be configured from the Mobile Devices panel.`)
+}
+
+async function removeHelper(options) {
+  assertRoot()
+  if (!await confirm('Remove the privileged mobile gateway helper? Existing Nginx configuration will be kept.', options.yes)) {
+    console.log('Cancelled.')
+    return
+  }
+  if (commandExists('systemctl')) {
+    try { run('systemctl', ['disable', '--now', path.basename(HELPER_SERVICE)]) } catch {}
+  }
+  for (const file of [HELPER_SERVICE, HELPER_INSTALL]) {
+    if (!fs.existsSync(file)) continue
+    const existing = fs.readFileSync(file, 'utf8')
+    if (!existing.slice(0, 256).includes(MARKER)) throw new Error(`refusing to remove unmanaged file: ${file}`)
+    fs.rmSync(file)
+    console.log(`Removed ${file}`)
+  }
+  if (commandExists('systemctl')) run('systemctl', ['daemon-reload'])
 }
 
 function metadataPublicIp() {
@@ -307,9 +435,12 @@ async function remove(options) {
 export {
   assertPublicIpv4,
   certName,
+  currentPackageSpec,
   nginxHttpConfig,
   nginxTlsConfig,
   parseArgs,
+  pluginInstallArgs,
+  helperService,
   renewalService,
   renewalTimer,
 }
@@ -329,6 +460,9 @@ if (isMainModule(process.argv[1])) {
   try {
     const options = parseArgs(process.argv.slice(2))
     if (options.command === 'help') printHelp()
+    else if (options.command === 'init') await init()
+    else if (options.command === 'setup-helper') setupHelper()
+    else if (options.command === 'remove-helper') await removeHelper(options)
     else if (options.command === 'setup') await setup(options)
     else if (options.command === 'status') status()
     else if (options.command === 'remove') await remove(options)

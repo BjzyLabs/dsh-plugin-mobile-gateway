@@ -1,10 +1,11 @@
 {
   "name": "dsh-plugin-mobile-gateway",
-  "version": "0.6.1",
+  "version": "0.6.4",
   "description": "update readme",
   "main": "lib/index.mjs",
   "files": [
     "bin",
+    "helper",
     "lib",
     "docs",
     "cordis.patch.yml",

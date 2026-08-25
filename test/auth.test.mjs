@@ -115,6 +115,16 @@ function expectRejected(url, options = {}) {
   const initialStatus = await (await fetch(`${base}/mgw/status`)).json()
   assert.equal(initialStatus.version, JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version)
   assert.equal(initialStatus.publicUrl, 'wss://203.0.113.10/ws/mobile')
+  assert.equal(initialStatus.webPort, webServer.port)
+  const helperStatus = await (await fetch(`${base}/mgw/public-setup`)).json()
+  assert.equal(helperStatus.installed, false)
+
+  const blockedPublicSetup = await fetch(`${base}/mgw/public-setup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: 'https://attacker.example' },
+    body: JSON.stringify({ publicIp: '8.8.8.8' }),
+  })
+  assert.equal(blockedPublicSetup.status, 403)
 
   assert.equal(await expectRejected(wsUrl), 503)
 

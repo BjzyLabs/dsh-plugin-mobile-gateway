@@ -1,6 +1,6 @@
 # dsh Mobile Gateway — WebSocket 协议参考
 
-移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.6.0）。
+移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.6.3）。
 
 - **本机端点**：`ws://127.0.0.1:3080/ws/mobile`（与 dsh web GUI 同端口）
 - **局域网端点**：`ws://<电脑的私有局域网 IP>:3081/ws/mobile`（插件独立监听，只提供经过鉴权的 WebSocket）
@@ -405,12 +405,26 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 | `workspaces` | — | 全部工作区（含每个的 `sessionIds`） |
 | `workspace-create` | `path` | 对**已存在目录**创建工作区（已归属→`created:false` 幂等） |
 | `directories` | `path?` | 浏览 server 目录（缺省 = home）；`crumbs` 面包屑 + `entries`（含 `hidden` 标记） |
+| `directory-create` | `path`, `name` | 在父目录下创建一个子文件夹 |
 
 ```json
 { "type": "workspace-create", "path": "/Users/lichaofan/DeepseekHarnessProject" }
 → { "kind": "workspace-create", "workspace": { "workspaceId": "w9", "path": "...", "title": "...", "sessionIds": [] },
     "created": true }
 ```
+
+### 创建文件夹
+
+`path` 是当前父目录的绝对路径，`name` 只传新文件夹名称，不传完整目标路径：
+
+```json
+{ "type": "directory-create", "path": "/Users/lichaofan/DeepseekHarnessProject", "name": "Sources" }
+→ { "kind": "directory-create", "path": "/Users/lichaofan/DeepseekHarnessProject/Sources" }
+```
+
+创建和目录浏览使用同一套宿主 Node 文件系统实现，不依赖 DSH 的 native Directory Picker，因此 macOS native 模式也可远程创建目录。父路径必须是绝对路径且必须指向真实存在的目录；名称去除首尾空白后不能为空、`.`、`..`，也不能包含 `/` 或 `\\`。
+
+创建成功后，iOS 应重新发送对应父目录的 `directories` 请求来刷新列表。请求格式、相对父路径或非法名称返回 `bad-request`；目标已存在返回 `directory-exists`；父目录不存在、不是目录或其他文件系统失败返回 `directory-create-failed`。此操作只创建文件夹，不会自动注册工作区；如果要把新目录作为工作区，再使用返回的 `path` 调用 `workspace-create`。
 
 ---
 
@@ -547,6 +561,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 - `/ws/mobile` 的移动网关默认关闭；本机 WebUI 手动开启后，若 5 分钟内没有设备成功连接会自动关闭
 - 网关开启后仍要求已配对设备凭证；不要把 `requireAuth` 设为 `false` 后暴露到网络
 - `/mgw/*` 是配对/吊销管理面，默认只允许本机访问；公网代理只应转发 `/ws/mobile`
+- `/mgw/public-setup` 仅供本机 WebUI 调用，通过受限 Unix Socket 请求 root Helper；Helper 只接受状态查询以及“公网 IPv4 + 当前 DSH 端口”的固定 Nginx 配置操作，不接受命令或文件路径
 - DSH HTTP Server 本身没有 TLS、认证或 Origin policy；公网必须使用 TLS 反向代理和 `wss://`
 - 长期 token 只保存在 iOS Keychain；服务端磁盘仅保存摘要
 - `set-default` / `save-default-model` 是全局写操作，客户端 UI 应加确认
@@ -574,6 +589,8 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 | v0.3.0 | 默认设备鉴权；一次性二维码配对；摘要化凭证存储；WebUI 设备面板；在线状态和即时吊销 |
 | v0.5.0 | Human-in-the-loop：转发 API Gateway question 请求、整批回答/取消、重连重放与多端状态收敛 |
 | v0.6.0 | DSH 0.1.1 图片：WebSocket Base64 上传、实时图片引用、历史附件按会话安全读取 |
+| v0.6.3 | macOS native picker 兼容：目录创建改用与目录浏览一致的宿主文件系统实现，并补齐路径、名称和错误码校验 |
+| v0.6.2 | 目录创建：通过 API Gateway `host.createDirectory` 在工作区目录下创建子文件夹 |
 
 ---
 

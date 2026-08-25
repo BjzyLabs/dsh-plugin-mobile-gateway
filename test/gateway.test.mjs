@@ -1,8 +1,12 @@
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
+const fs = require('node:fs')
 const http = require('node:http')
+const os = require('node:os')
+const path = require('node:path')
 const plugin = (await import('../lib/index.mjs')).default
+const directoryTestRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-directory-'))
 
 const listeners = {}
 let disposer = null
@@ -75,7 +79,9 @@ function fakeApi() {
       })
       return { accepted: true }
     },
-    host: { async describe() { return { rpcId: 'r', result: { ok: true, value: { version: 't', cwd: '/Users/lichaofan', attachedSessions: 1, canOpenPath: true } } } } },
+    host: {
+      async describe() { return { rpcId: 'r', result: { ok: true, value: { version: 't', cwd: '/Users/lichaofan', attachedSessions: 1, canOpenPath: true } } } },
+    },
     llm: {
       async models() { return { rpcId: 'r', result: { ok: true, value: { groups: [{ id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat', reasoning: { efforts: [{ id: 'low', name: 'Low' }] } }] }], failures: [] } } } },
       async providers() { return { rpcId: 'r', result: { ok: true, value: { providers: [{ provider: 'deepseek', displayName: 'DeepSeek', declared: true }] } } } },
@@ -213,6 +219,13 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
     ['search', { type: 'search', query: 'q' }, (m) => m.kind === 'search'],
     ['host', { type: 'host' }, (m) => m.kind === 'host'],
     ['directories', { type: 'directories', path: '/tmp' }, (m) => m.kind === 'directories'],
+    ['directory-create', { type: 'directory-create', path: directoryTestRoot, name: 'Sources' }, (m) => m.kind === 'directory-create' && m.path === path.join(directoryTestRoot, 'Sources') && fs.statSync(m.path).isDirectory()],
+    ['directory-create duplicate', { type: 'directory-create', path: directoryTestRoot, name: 'Sources' }, (m) => m.kind === 'error' && m.code === 'directory-exists'],
+    ['directory-create missing name', { type: 'directory-create', path: directoryTestRoot }, (m) => m.kind === 'error' && m.code === 'bad-request'],
+    ['directory-create dot name', { type: 'directory-create', path: directoryTestRoot, name: '..' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
+    ['directory-create nested name', { type: 'directory-create', path: directoryTestRoot, name: 'nested/child' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
+    ['directory-create relative parent', { type: 'directory-create', path: 'relative', name: 'Sources' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
+    ['directory-create missing parent', { type: 'directory-create', path: path.join(directoryTestRoot, 'missing'), name: 'Sources' }, (m) => m.kind === 'error' && m.code === 'directory-create-failed'],
     ['workspace-create', { type: 'workspace-create', path: '/tmp' }, (m) => m.kind === 'workspace-create'],
     ['models', { type: 'models', sessionId: 's1' }, (m) => m.kind === 'models' && m.groups[0].models[0].reasoning.efforts.length === 2],
     ['select-model', { type: 'select-model', sessionId: 's1', provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' }, (m) => m.kind === 'select-model' && m.selected.reasoningEffort === 'high'],
