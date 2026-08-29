@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-mobile-gateway",
-  "version": "0.6.4",
-  "description": "update readme",
+  "version": "0.6.5",
+  "description": "modify gateway image param",
   "main": "lib/index.mjs",
   "files": [
     "bin",
