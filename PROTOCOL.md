@@ -1,6 +1,6 @@
 # dsh Mobile Gateway — WebSocket 协议参考
 
-移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.6.3）。
+移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问与操作审批、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.6.8）。
 
 - **本机端点**：`ws://127.0.0.1:3080/ws/mobile`（与 dsh web GUI 同端口）
 - **局域网端点**：`ws://<电脑的私有局域网 IP>:3081/ws/mobile`（插件独立监听，只提供经过鉴权的 WebSocket）
@@ -77,7 +77,7 @@ const pairingText = Buffer.from(JSON.stringify(payload), 'utf8').toString('base6
 ```json
 { "kind": "paired", "token": "<长期设备 token>",
   "device": { "id": "...", "name": "iPhone", "createdAt": 1787111700000 } }
-{ "kind": "hello", "protocol": 3, "capabilities": ["images"], "authenticated": true,
+{ "kind": "hello", "protocol": 3, "capabilities": ["images", "file-downloads"], "authenticated": true,
   "device": { "id": "...", "name": "iPhone" }, "port": 3080, "clients": 1 }
 ```
 
@@ -138,7 +138,7 @@ func connectAuthenticated(publicURL: URL, token: String) -> URLSessionWebSocketT
 | type | 参数 | 说明 |
 |---|---|---|
 | `ping` | — | 心跳；回复 `pong` |
-| `subscribe` | `sessionId` | 事件流过滤：之后只收到该会话的 `event`（不订阅 = 接收所有会话） |
+| `subscribe` | `sessionId` | 事件流过滤：之后只收到该会话的 `event`，并重放该会话仍待处理的提问与审批（不订阅 = 接收所有会话） |
 | `unsubscribe` | — | 取消过滤 |
 
 ```json
@@ -149,13 +149,26 @@ func connectAuthenticated(publicURL: URL, token: String) -> URLSessionWebSocketT
 → {"kind":"subscribed","sessionId":"session-abc"}
 ```
 
+`subscribed` 之后，服务端会紧接着发送该 Session 尚未处理的
+`question-requested` / `approval-requested`，并标记 `replay: true`。客户端必须按
+`rpcId` 去重。这保证移动端在审批产生后才打开已有 Session 时仍能显示待处理卡片。
+
 ---
 
-## 3. Human-in-the-loop 提问与回答
+## 3. Human-in-the-loop
 
-Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway 的 `events.mux()` 收到临时的待回答请求，并推送给移动端。该请求不属于持久化的 `session/event`；回答必须使用本节协议，不能作为普通 `message` 发送。
+Human-in-the-loop 分为两条独立通道：
 
-### `question-requested` — 服务端推送问题
+- **提问**：Agent 的 `ask_user_question` 工具向用户收集答案。
+- **审批**：高风险工具操作（例如沙箱升权）请求一次性允许或拒绝。
+
+二者都是 API Gateway 的临时请求，不属于持久化的 `session/event`，且都必须以其原始 `rpcId` 通过专用响应帧回答，不能作为普通 `message` 发送。
+
+### 3.1 提问与回答
+
+Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway 的 `events.mux()` 收到临时的待回答请求，并推送给移动端。
+
+#### `question-requested` — 服务端推送问题
 
 ```json
 {
@@ -187,7 +200,7 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
 - `intent`：可选展示意图。目前可能为 `{ "kind":"plan-review", "approve":"批准选项标签" }`；未知 intent 应退化为普通选项列表。
 - `replay: true`：可选。表示这是移动端连接后重放的仍待回答问题。iOS 必须按 `rpcId` 去重。
 
-### `question-answer` — 移动端提交整批答案
+#### `question-answer` — 移动端提交整批答案
 
 ```json
 {
@@ -236,7 +249,7 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
 
 答案结构不合法时 `reason` 为 `bad-response`。这两种情况均不能重发为普通聊天消息。
 
-### `question-cancel` — 跳过/取消整批问题
+#### `question-cancel` — 跳过/取消整批问题
 
 ```json
 { "type":"question-cancel", "rpcId":"5ce4f5d1-...", "sessionId":"session-abc" }
@@ -244,7 +257,7 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
 
 回执仍为 `question-response`，其中 `action` 为 `cancel`。取消会让等待中的 `ask_user_question` 以 `ASK_CANCELLED` 结束，iOS 应在用户确认后再执行。
 
-### `question-resolved` — 服务端广播最终状态
+#### `question-resolved` — 服务端广播最终状态
 
 ```json
 { "kind":"question-resolved", "rpcId":"5ce4f5d1-...", "sessionId":"session-abc",
@@ -252,6 +265,72 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
 ```
 
 `outcome` 为 `answered` 或 `cancelled`。WebUI、iOS 或其他客户端中的第一个合法响应获胜；所有移动连接都会收到最终状态并应关闭对应选择界面。移动端断线重连后，API Gateway 会重放仍待回答的问题；DSH 进程重启则会取消这些仅存在于运行时的问题。
+
+---
+
+### 3.2 操作审批
+
+当 DSH 的工具管线要求人工授权时，插件会从 API Gateway 收到一次 `approval/requested`。这正是 Web UI 中“等待审批”卡片对应的事件：`reason` 是面向用户的审批说明，`toolName` 标识请求操作的工具，`callId` 可用于与实时工具调用轨迹关联。
+
+#### `approval-requested` — 服务端推送待审批操作
+
+```json
+{
+  "kind": "approval-requested",
+  "rpcId": "approval-rpc-1",
+  "sessionId": "session-abc",
+  "approvalId": "approval-1",
+  "toolName": "bash",
+  "callId": "call-42",
+  "reason": "escalate sandbox to danger-full-access",
+  "replay": true
+}
+```
+
+- `rpcId`：本次可回答请求的稳定 RPC ID；提交决定时必须原样返回。
+- `approvalId`：审批审计 ID；同样必须原样返回，并用于将最终状态关联到本地审批卡片。
+- `toolName`：请求审批的工具名。
+- `callId` / `reason`：可选。前者可关联工具调用，后者应直接显示为待审批原因。
+- `replay: true`：表示当前仍未决定的审批在移动端连接或切换 Session 后重放。客户端应按 `rpcId` 去重。
+
+审批请求不含工具完整参数；移动端应将 `reason` 与可见的工具调用轨迹作为展示依据，不应自行推断或构造命令。
+
+#### `approval-response` — 移动端提交决定
+
+```json
+{
+  "type": "approval-response",
+  "rpcId": "approval-rpc-1",
+  "sessionId": "session-abc",
+  "approvalId": "approval-1",
+  "outcome": "allowed-once"
+}
+```
+
+`outcome` 只能是：
+
+- `allowed-once`：仅允许这一次请求的操作。
+- `rejected`：拒绝该操作。
+
+这是一次性决定；协议不支持“始终允许”。`cancelled` 与 `unavailable` 是宿主侧状态，移动端不得提交。请求的 `sessionId`、`approvalId` 与 `rpcId` 必须匹配同一待审批项。
+
+网关立即返回交付回执：
+
+```json
+{ "kind":"approval-response", "rpcId":"approval-rpc-1", "sessionId":"session-abc",
+  "approvalId":"approval-1", "outcome":"allowed-once", "accepted":true }
+```
+
+如果 Web UI 或另一台移动设备已经先作出决定，则回执为 `accepted:false`，并附带 `reason:"not-pending"`。收到错误帧或未被接受的回执时，客户端应保留当前状态，等待最终状态或重新打开事件流。
+
+#### `approval-resolved` — 服务端广播最终状态
+
+```json
+{ "kind":"approval-resolved", "rpcId":"approval-rpc-1", "sessionId":"session-abc",
+  "approvalId":"approval-1", "outcome":"allowed-once" }
+```
+
+`outcome` 为 `allowed-once`、`rejected`、`cancelled` 或 `unavailable`。所有移动连接都会收到最终状态并关闭对应审批卡片。移动端断线重连后，API Gateway 会重放仍待决定的审批；已决审批不会重放。
 
 ---
 
@@ -322,6 +401,10 @@ let image = [
 | `sessions` | — | 会话列表（`updatedAt/running/blank/cwd/agentPreset`） |
 | `history` | `sessionId`, `beforeSeq?`, `maxMessages?`, `maxBytes?`, `view?` | 历史事件页（见下） |
 | `attachment` | `sessionId`, `attachmentId` | 读取历史中属于该会话的图片字节 |
+| `file-list` | `sessionId`, `path?`, `requestId?` | 列出会话工作目录内的一层文件与文件夹 |
+| `file-download-open` | `sessionId`, `path`, `requestId` | 打开一个工作目录内的普通文件下载 |
+| `file-download-read` | `transferId`, `offset` | 拉取下载的下一块字节 |
+| `file-download-cancel` | `transferId` | 取消并关闭下载 |
 | `search` | `query` | 会话全文搜索 |
 | `session-stats` | `sessionId` | 执行统计投影（输入框统计条数据源） |
 | `context-usage` | `sessionId` | token 用量 + 上下文占用投影 |
@@ -383,6 +466,46 @@ iOS 发现尚未缓存的 `attachmentId` 后发送：
 ```
 
 iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建议以 `attachmentId` 为缓存键。不要把 Base64 长期保存在对话模型对象里。并发同步历史时可限制为 2～4 个附件请求，优先加载当前可见消息。
+
+### 文件下载（图片、文档、IPA、APK 及其他普通文件）
+
+文件下载是独立于历史图片 `attachment` 的二进制传输通道。它不按扩展名做授权白名单：图片、PDF/Office 文档、`.ipa`、`.apk` 和其他**普通文件**均可下载；服务端仅根据扩展名给出 `mediaType`，以便移动端决定打开方式。
+
+所有 `path` 都是相对于该 `sessionId` 的 `cwd` 的相对路径，使用 `/` 分隔。例如先列出根目录：
+
+```json
+{ "type": "file-list", "requestId": "files-1", "sessionId": "session-abc" }
+→ {
+  "kind": "file-list", "requestId": "files-1", "sessionId": "session-abc", "path": ".",
+  "entries": [
+    { "name": "builds", "path": "builds", "kind": "directory" },
+    { "name": "app.ipa", "path": "app.ipa", "kind": "file", "bytes": 123456,
+      "modifiedAt": 1787111700000, "mediaType": "application/octet-stream" }
+  ]
+}
+```
+
+打开并按需拉取每一块：
+
+```json
+{ "type": "file-download-open", "requestId": "download-1", "sessionId": "session-abc", "path": "builds/app-release.apk" }
+→ { "kind": "file-download-opened", "requestId": "download-1", "transferId": "...",
+    "sessionId": "session-abc", "path": "builds/app-release.apk", "name": "app-release.apk",
+    "mediaType": "application/vnd.android.package-archive", "size": 2345678, "chunkBytes": 524288 }
+
+{ "type": "file-download-read", "transferId": "...", "offset": 0 }
+→ { "kind": "file-download-chunk", "transferId": "...", "offset": 0,
+    "data": "<标准 Base64>", "eof": false }
+
+{ "type": "file-download-read", "transferId": "...", "offset": 524288 }
+→ { "kind": "file-download-chunk", "transferId": "...", "offset": 524288,
+    "data": "<标准 Base64>", "eof": true, "sha256": "<64 位十六进制摘要>" }
+```
+
+- 客户端必须严格使用服务端返回块的 `offset + 已解码 data 字节数` 作为下一次 `offset`；当前版本不支持断线续传。请先写入临时文件，收到 `eof: true` 后校验整文件 SHA-256，再原子重命名为最终文件。
+- 每个 `transferId` 仅归属创建它的 WebSocket 连接。连接关闭、`file-download-cancel`、空闲 2 分钟、传完最后一块或插件卸载都会关闭文件句柄；取消成功返回 `{ "kind":"file-download-cancelled", "transferId":"..." }`。
+- 默认每块为 512 KiB、同时最多 4 个下载、单个文件最多 512 MiB。部署方可用 `fileDownloadChunkBytes`、`fileDownloadMaxTransfers`、`fileDownloadMaxBytes`、`fileDownloadIdleMs` 调整；`fileDownloadsEnabled: false` 会关闭该能力，且 `hello.capabilities` 不再包含 `file-downloads`。
+- 绝对路径、空路径（`file-download-open`）、`..` 路径段、NUL 字符、工作目录外的符号链接、目录和其他非普通文件都会被拒绝。`file-list` 不返回符号链接，避免客户端误认为其可下载。
 
 ### `session-stats` 详细（输入框统计条）
 ```json
@@ -523,9 +646,10 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 | kind | 触发时机 |
 |---|---|
 | `paired` | 首次配对成功；仅此一次返回长期设备 token |
-| `hello` | 连接成功：`{ "kind":"hello", "protocol":3, "capabilities":["images"], "authenticated":true, "port":3080, "clients":1 }` |
+| `hello` | 连接成功：`{ "kind":"hello", "protocol":3, "capabilities":["images","file-downloads"], "authenticated":true, "port":3080, "clients":1 }` |
 | `event` | 任意会话的 agent 输出（见下） |
 | `question-requested` / `question-resolved` | Human-in-the-loop 问题请求与最终状态 |
+| `approval-requested` / `approval-resolved` | Human-in-the-loop 操作审批请求与最终状态 |
 | `pong` / `subscribed` / `sent` | 对应请求的回复 |
 
 ### `event` 帧（agent 实时输出）
@@ -566,6 +690,8 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 - 长期 token 只保存在 iOS Keychain；服务端磁盘仅保存摘要
 - `set-default` / `save-default-model` 是全局写操作，客户端 UI 应加确认
 - `question-answer` / `question-cancel` 会直接恢复或终止等待中的 Agent 工具调用；只允许经过鉴权的可信设备提交，并按 `rpcId` 防止重复操作
+- `approval-response` 会直接允许或拒绝等待中的高风险工具操作；只允许经过鉴权的可信设备提交，并按 `rpcId` 和 `approvalId` 防止串用或重复操作
+- 文件下载只允许读取该会话 `cwd` 内的普通文件；移动端必须在写入完成后校验最终块给出的 SHA-256，且不得把 `transferId` 视为可跨连接复用的凭证
 
 ---
 
@@ -589,8 +715,11 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 | v0.3.0 | 默认设备鉴权；一次性二维码配对；摘要化凭证存储；WebUI 设备面板；在线状态和即时吊销 |
 | v0.5.0 | Human-in-the-loop：转发 API Gateway question 请求、整批回答/取消、重连重放与多端状态收敛 |
 | v0.6.0 | DSH 0.1.1 图片：WebSocket Base64 上传、实时图片引用、历史附件按会话安全读取 |
-| v0.6.3 | macOS native picker 兼容：目录创建改用与目录浏览一致的宿主文件系统实现，并补齐路径、名称和错误码校验 |
 | v0.6.2 | 目录创建：通过 API Gateway `host.createDirectory` 在工作区目录下创建子文件夹 |
+| v0.6.3 | macOS native picker 兼容：目录创建改用与目录浏览一致的宿主文件系统实现，并补齐路径、名称和错误码校验 |
+| v0.6.6 | Human-in-the-loop 操作审批：转发 API Gateway approval 请求、一次性允许/拒绝、重连重放与多端最终状态收敛 |
+| v0.6.7 | 订阅已有 Session 时重放待处理 Human-in-the-loop 请求，并增加 Approval 端到端诊断日志与安装版本标记 |
+| v0.6.8 | 会话工作目录受限的文件列表与分块下载：支持图片、文档、IPA、APK 等普通文件，含连接归属、路径越界防护、取消、超时和 SHA-256 完整性校验 |
 
 ---
 

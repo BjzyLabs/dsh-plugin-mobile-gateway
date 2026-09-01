@@ -5,8 +5,18 @@ const fs = require('node:fs')
 const http = require('node:http')
 const os = require('node:os')
 const path = require('node:path')
+const crypto = require('node:crypto')
 const plugin = (await import('../lib/index.mjs')).default
 const directoryTestRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-directory-'))
+const fileDownloadRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-files-'))
+const fileDownloadDir = path.join(fileDownloadRoot, 'builds')
+const fileDownloadBytes = Buffer.alloc(150 * 1024, 0x5a)
+const outsideFile = path.join(os.tmpdir(), `dsh-mobile-outside-${process.pid}.bin`)
+fs.mkdirSync(fileDownloadDir)
+fs.writeFileSync(path.join(fileDownloadDir, 'app-release.apk'), fileDownloadBytes)
+fs.writeFileSync(path.join(fileDownloadRoot, 'guide.pdf'), Buffer.from('%PDF-1.7\nmobile gateway\n'))
+fs.writeFileSync(outsideFile, Buffer.from('outside workspace'))
+fs.symlinkSync(outsideFile, path.join(fileDownloadRoot, 'outside-link.bin'))
 
 const listeners = {}
 let disposer = null
@@ -51,6 +61,29 @@ function fakeApi() {
       },
     },
   ]
+  const initialApprovals = [
+    {
+      rpcId: 'approval-rpc-1',
+      payload: {
+        type: 'approval/requested',
+        sessionId: 's1',
+        approvalId: 'approval-1',
+        toolName: 'bash',
+        callId: 'call-1',
+        reason: 'escalate sandbox to danger-full-access',
+      },
+    },
+    {
+      rpcId: 'approval-rpc-2',
+      payload: {
+        type: 'approval/requested',
+        sessionId: 's2',
+        approvalId: 'approval-2',
+        toolName: 'bash',
+        reason: 'write outside the workspace',
+      },
+    },
+  ]
   return {
     promptCalls,
     settingsUpdates,
@@ -59,6 +92,7 @@ function fakeApi() {
     events: {
       async *mux(_request, signal) {
         for (const frame of initialQuestions) yield frame
+        for (const frame of initialApprovals) yield frame
         while (!signal.aborted) {
           if (muxFrames.length > 0) yield muxFrames.shift()
           else await new Promise((resolve) => setTimeout(resolve, 5))
@@ -67,6 +101,19 @@ function fakeApi() {
     },
     async respond(message) {
       respondCalls.push(message)
+      const approval = message.result.ok && message.result.value && typeof message.result.value.approvalId === 'string'
+      if (approval) {
+        muxFrames.push({
+          rpcId: `resolved-${respondCalls.length}`,
+          payload: {
+            type: 'approval/resolved',
+            sessionId: message.result.value.sessionId,
+            approvalId: message.result.value.approvalId,
+            outcome: message.result.value.outcome,
+          },
+        })
+        return { accepted: true }
+      }
       const outcome = message.result.ok ? 'answered' : 'cancelled'
       muxFrames.push({
         rpcId: `resolved-${respondCalls.length}`,
@@ -101,7 +148,20 @@ function fakeApi() {
       async update(req) { settingsUpdates.push(req.payload); return { rpcId: 'r', result: { ok: true, value: { ns: req.payload.ns, value: req.payload.patch, revision: 2 } } } },
     },
     sessions: {
-      async list() { return { rpcId: 'r', result: { ok: true, value: { items: [] } } } },
+      async list() {
+        return {
+          rpcId: 'r',
+          result: {
+            ok: true,
+            value: {
+              items: [
+                { sessionId: 's1', cwd: fileDownloadRoot, updatedAt: 1, running: false, blank: false },
+                { sessionId: 's2', cwd: fileDownloadRoot, updatedAt: 2, running: false, blank: false },
+              ],
+            },
+          },
+        }
+      },
       async history() {
         const fakeEvents = [
           { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'image', attachment: imageAttachment }, { type: 'text', text: 'hi' }] } },
@@ -155,7 +215,12 @@ ctx.typertGateway = {
     return { commandId: 'cmd-1', result: { kind: 'success', text: 'switched' } }
   },
 }
-plugin.apply(ctx, { gatewayEnabled: true, requireAuth: false, deviceFile: '/tmp/dsh-mobile-gateway-dispatch-test-devices.json' })
+plugin.apply(ctx, {
+  gatewayEnabled: true,
+  requireAuth: false,
+  deviceFile: '/tmp/dsh-mobile-gateway-dispatch-test-devices.json',
+  fileDownloadChunkBytes: 64 * 1024,
+})
 server.listen(webServer.port)
 
 const WebSocket = require('ws')
@@ -188,6 +253,92 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
   interactionResults.push(['question answer', answerReady && answerReceipt.accepted === true && answerCall.type === 'client-response' && answerCall.result.value.answer.answers[1].custom === 'Security'])
   const answeredResolved = await waitFor(() => got.some((m) => m.kind === 'question-resolved' && m.rpcId === 'question-rpc-1' && m.outcome === 'answered'), 2000)
   interactionResults.push(['question answered resolution', answeredResolved])
+
+  const approvalRequestedReady = await waitFor(() => got.filter((m) => m.kind === 'approval-requested').length === 2, 2000)
+  const requestedApproval = got.find((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-1')
+  interactionResults.push(['approval requested + replay', approvalRequestedReady && requestedApproval && requestedApproval.replay === true && requestedApproval.approvalId === 'approval-1' && requestedApproval.toolName === 'bash' && requestedApproval.callId === 'call-1' && requestedApproval.reason === 'escalate sandbox to danger-full-access'])
+
+  const approvalReplayCount = got.filter((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-2').length
+  ws.send(JSON.stringify({ type: 'subscribe', sessionId: 's2' }))
+  const subscribedApprovalReady = await waitFor(() => got.filter((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-2').length > approvalReplayCount, 2000)
+  const subscribedApproval = got.filter((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-2').at(-1)
+  const wrongSessionApprovalCount = got.filter((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-1').length
+  interactionResults.push(['approval replayed when existing session is opened', subscribedApprovalReady && subscribedApproval && subscribedApproval.replay === true && wrongSessionApprovalCount === 1])
+  ws.send(JSON.stringify({ type: 'unsubscribe' }))
+  await waitFor(() => got.some((m) => m.kind === 'subscribed' && m.sessionId === null), 2000)
+
+  ws.send(JSON.stringify({
+    type: 'approval-response',
+    rpcId: 'approval-rpc-1',
+    sessionId: 's1',
+    approvalId: 'approval-1',
+    outcome: 'allowed-once',
+  }))
+  const approvalAllowedReady = await waitFor(() => got.some((m) => m.kind === 'approval-response' && m.rpcId === 'approval-rpc-1'), 2000)
+  const approvalAllowedReceipt = got.find((m) => m.kind === 'approval-response' && m.rpcId === 'approval-rpc-1')
+  const approvalAllowedCall = api.respondCalls.find((m) => m.rpcId === 'approval-rpc-1')
+  interactionResults.push(['approval allowed once', approvalAllowedReady && approvalAllowedReceipt.accepted === true && approvalAllowedReceipt.outcome === 'allowed-once' && approvalAllowedCall.type === 'client-response' && approvalAllowedCall.result.ok === true && approvalAllowedCall.result.value.approvalId === 'approval-1' && approvalAllowedCall.result.value.outcome === 'allowed-once'])
+  const approvalAllowedResolved = await waitFor(() => got.some((m) => m.kind === 'approval-resolved' && m.rpcId === 'approval-rpc-1' && m.approvalId === 'approval-1' && m.outcome === 'allowed-once'), 2000)
+  interactionResults.push(['approval allowed resolution', approvalAllowedResolved])
+
+  ws.send(JSON.stringify({
+    type: 'approval-response',
+    rpcId: 'approval-rpc-2',
+    sessionId: 's2',
+    approvalId: 'approval-2',
+    outcome: 'rejected',
+  }))
+  const approvalRejectedReady = await waitFor(() => got.some((m) => m.kind === 'approval-response' && m.rpcId === 'approval-rpc-2'), 2000)
+  const approvalRejectedReceipt = got.find((m) => m.kind === 'approval-response' && m.rpcId === 'approval-rpc-2')
+  interactionResults.push(['approval rejected', approvalRejectedReady && approvalRejectedReceipt.accepted === true && approvalRejectedReceipt.outcome === 'rejected'])
+  const approvalRejectedResolved = await waitFor(() => got.some((m) => m.kind === 'approval-resolved' && m.rpcId === 'approval-rpc-2' && m.approvalId === 'approval-2' && m.outcome === 'rejected'), 2000)
+  interactionResults.push(['approval rejected resolution', approvalRejectedResolved])
+
+  ws.send(JSON.stringify({ type: 'approval-response', rpcId: 'approval-rpc-2', sessionId: 's2', approvalId: 'approval-2', outcome: 'later' }))
+  const badApprovalReady = await waitFor(() => got.some((m) => m.kind === 'error' && m.requestType === 'approval-response'), 2000)
+  interactionResults.push(['approval invalid outcome', badApprovalReady])
+
+  ws.send(JSON.stringify({ type: 'file-list', requestId: 'files-1', sessionId: 's1' }))
+  const fileListReady = await waitFor(() => got.some((m) => m.kind === 'file-list' && m.requestId === 'files-1'), 2000)
+  const fileList = got.find((m) => m.kind === 'file-list' && m.requestId === 'files-1')
+  interactionResults.push(['file list workspace only', fileListReady && fileList.path === '.' && fileList.entries.some((e) => e.path === 'builds' && e.kind === 'directory') && fileList.entries.some((e) => e.path === 'guide.pdf' && e.mediaType === 'application/pdf') && !fileList.entries.some((e) => e.name === 'outside-link.bin')])
+
+  ws.send(JSON.stringify({ type: 'file-download-open', requestId: 'download-1', sessionId: 's1', path: 'builds/app-release.apk' }))
+  const openedReady = await waitFor(() => got.some((m) => m.kind === 'file-download-opened' && m.requestId === 'download-1'), 2000)
+  const opened = got.find((m) => m.kind === 'file-download-opened' && m.requestId === 'download-1')
+  interactionResults.push(['file download open', openedReady && opened.name === 'app-release.apk' && opened.mediaType === 'application/vnd.android.package-archive' && opened.size === fileDownloadBytes.length && opened.chunkBytes === 64 * 1024])
+
+  const downloadedChunks = []
+  let nextOffset = 0
+  let completedDownload = null
+  while (openedReady && !completedDownload) {
+    const beforeChunks = got.filter((m) => m.kind === 'file-download-chunk' && m.transferId === opened.transferId).length
+    ws.send(JSON.stringify({ type: 'file-download-read', transferId: opened.transferId, offset: nextOffset }))
+    const chunkReady = await waitFor(() => got.filter((m) => m.kind === 'file-download-chunk' && m.transferId === opened.transferId).length > beforeChunks, 2000)
+    const chunk = got.filter((m) => m.kind === 'file-download-chunk' && m.transferId === opened.transferId).at(-1)
+    if (!chunkReady || !chunk || chunk.offset !== nextOffset) break
+    downloadedChunks.push(Buffer.from(chunk.data, 'base64'))
+    nextOffset += downloadedChunks.at(-1).length
+    if (chunk.eof) completedDownload = chunk
+  }
+  const downloadedBytes = Buffer.concat(downloadedChunks)
+  const expectedSha256 = crypto.createHash('sha256').update(fileDownloadBytes).digest('hex')
+  interactionResults.push(['file download chunks + sha256', completedDownload && downloadedBytes.equals(fileDownloadBytes) && completedDownload.sha256 === expectedSha256])
+
+  ws.send(JSON.stringify({ type: 'file-download-open', requestId: 'cancel-1', sessionId: 's1', path: 'guide.pdf' }))
+  const cancelOpenReady = await waitFor(() => got.some((m) => m.kind === 'file-download-opened' && m.requestId === 'cancel-1'), 2000)
+  const cancelOpen = got.find((m) => m.kind === 'file-download-opened' && m.requestId === 'cancel-1')
+  if (cancelOpenReady) ws.send(JSON.stringify({ type: 'file-download-cancel', transferId: cancelOpen.transferId }))
+  const cancelledDownloadReady = await waitFor(() => cancelOpenReady && got.some((m) => m.kind === 'file-download-cancelled' && m.transferId === cancelOpen.transferId), 2000)
+  interactionResults.push(['file download cancel', cancelledDownloadReady])
+
+  ws.send(JSON.stringify({ type: 'file-download-open', requestId: 'escape-1', sessionId: 's1', path: '../outside.bin' }))
+  const escapedPathReady = await waitFor(() => got.some((m) => m.kind === 'error' && m.requestType === 'file-download-open' && m.code === 'bad-request'), 2000)
+  interactionResults.push(['file download rejects parent path', escapedPathReady])
+
+  ws.send(JSON.stringify({ type: 'file-download-open', requestId: 'symlink-1', sessionId: 's1', path: 'outside-link.bin' }))
+  const symlinkPathReady = await waitFor(() => got.some((m) => m.kind === 'error' && m.requestType === 'file-download-open' && m.code === 'file-not-allowed'), 2000)
+  interactionResults.push(['file download rejects escaping symlink', symlinkPathReady])
 
   ws.send(JSON.stringify({ type: 'question-cancel', rpcId: 'question-rpc-2', sessionId: 's2' }))
   const cancelReady = await waitFor(() => got.some((m) => m.kind === 'question-response' && m.rpcId === 'question-rpc-2'), 2000)

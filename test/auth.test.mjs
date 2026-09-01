@@ -223,7 +223,7 @@ function expectRejected(url, options = {}) {
   assert.equal(pairedSocket.protocol, 'dsh-mobile-v1')
   assert.equal(hello.authenticated, true)
   assert.equal(hello.protocol, 3)
-  assert.deepEqual(hello.capabilities, ['images'])
+  assert.deepEqual(hello.capabilities, ['images', 'file-downloads'])
   const connectedStatus = await (await fetch(`${base}/mgw/status`)).json()
   assert.equal(connectedStatus.gatewayEnabled, true)
   assert.equal(connectedStatus.waitExpiresAt, null)
