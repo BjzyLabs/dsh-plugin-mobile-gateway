@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-mobile-gateway",
   "version": "0.6.8",
-  "description": "modify gateway image param",
+  "description": "1.support permission requirement;\n2. support file transfer",
   "main": "lib/index.mjs",
   "files": [
     "bin",
