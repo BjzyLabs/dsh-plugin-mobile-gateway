@@ -4,7 +4,7 @@
 
 # dsh-plugin-mobile-gateway
 
-让 iPhone 通过经过设备鉴权的 WebSocket 连接 DeepSeek Harness。安装后，Harness WebUI 左侧边栏会出现“移动设备”入口，可直接开启网关、生成配对二维码和管理可信设备。
+DeepSeek Harness 的设备鉴权移动网关，支持会话与实时事件、服务端驱动的命令和技能菜单、Human-in-the-loop、图片及文件传输。安装后，Harness WebUI 左侧边栏会出现“移动设备”入口，可直接开启网关、生成配对二维码和管理可信设备。
 
 - WebSocket：`/ws/mobile`
 - 局域网：`ws://<局域网 IP>:3081/ws/mobile`
@@ -13,7 +13,7 @@
 
 ## 配套 iOS 客户端
 
-[DeepSeek Harness Mobile](https://github.com/Clarklevis1995/dsh-mobile) 是本仓库的兄弟项目。它是面向 iOS 17+ 的 SwiftUI 原生客户端，支持工作区与会话、工作区内创建文件夹、历史和实时对话、图片、Agent 执行轨迹、Human-in-the-loop、模型与权限设置。
+[DeepSeek Harness Mobile](https://github.com/Clarklevis1995/dsh-mobile) 是本仓库的兄弟项目。它是面向 iOS 17+ 的 SwiftUI 原生客户端，支持工作区与会话、工作区内创建文件夹、历史和实时对话、图片、Agent 执行轨迹、Human-in-the-loop，以及由网关配置驱动的命令、技能、模型与权限菜单。
 
 <table>
   <tr>

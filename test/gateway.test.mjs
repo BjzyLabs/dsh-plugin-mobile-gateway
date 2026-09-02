@@ -129,6 +129,22 @@ function fakeApi() {
     host: {
       async describe() { return { rpcId: 'r', result: { ok: true, value: { version: 't', cwd: '/Users/lichaofan', attachedSessions: 1, canOpenPath: true } } } },
     },
+    skills: {
+      async list() {
+        return {
+          rpcId: 'r',
+          result: {
+            ok: true,
+            value: {
+              skills: [
+                { name: 'android-cli', description: 'Install and use the Android CLI', whenToUse: 'Use for Android device automation', modelInvocable: true },
+                { name: 'design-taste-frontend', description: 'Improve frontend visual design', modelInvocable: false },
+              ],
+            },
+          },
+        }
+      },
+    },
     llm: {
       async models() { return { rpcId: 'r', result: { ok: true, value: { groups: [{ id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat', reasoning: { efforts: [{ id: 'low', name: 'Low' }] } }] }], failures: [] } } } },
       async providers() { return { rpcId: 'r', result: { ok: true, value: { providers: [{ provider: 'deepseek', displayName: 'DeepSeek', declared: true }] } } } },
@@ -172,7 +188,7 @@ function fakeApi() {
           { type: 'request/header', seq: 6, time: 6, data: { header: { system: 'sys'.repeat(2000) }, reason: 'initial' } },
           { type: 'assistant/message', seq: 7, time: 7, data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'done' }] } } },
         ]
-        return { rpcId: 'r', result: { ok: true, value: { events: fakeEvents.map((e) => ({ event: e })), hasMore: false, projections: { asOfSeq: 42, values: { tokenUsage: { totals: { inputTokens: 10, outputTokens: 5 }, last: null }, contextPressure: { contextWindow: 128000, pressureTokens: 1500, surfaceTokens: 2000 }, permissions: { preset: 'ask', sandbox: 'none', approval: 'ask' }, sessionStats: { turns: 6, steps: 69, llmMs: 2280000, toolMs: 41400, ttftMs: 2600, ttftSteps: 1, decodeMs: 5000, decodeTokens: 385, lastTurn: 6, openStep: null, pendingCalls: {} } } } } } }
+        return { rpcId: 'r', result: { ok: true, value: { events: fakeEvents.map((e) => ({ event: e })), hasMore: false, projections: { asOfSeq: 42, values: { tokenUsage: { totals: { inputTokens: 10, outputTokens: 5 }, last: null }, contextPressure: { contextWindow: 128000, pressureTokens: 1500, surfaceTokens: 2000 }, permissions: { options: [{ value: 'ask', name: 'Ask', description: 'Ask before risky operations' }, { value: 'workspace-write', name: 'Workspace Write' }], currentValue: 'ask' }, sessionStats: { turns: 6, steps: 69, llmMs: 2280000, toolMs: 41400, ttftMs: 2600, ttftSteps: 1, decodeMs: 5000, decodeTokens: 385, lastTurn: 6, openStep: null, pendingCalls: {} } } } } } }
       },
       async search() { return { rpcId: 'r', result: { ok: true, value: { items: [], hasMore: false } } } },
       async attachment(req) {
@@ -209,8 +225,18 @@ ctx.agentDefaultModel = {
 ctx.typertGateway = {
   async invoke(req) {
     invokeCalls.push(req)
+    if (req.namespace === 'commands' && req.method === 'list') {
+      return [
+        { name: 'compact', description: 'Compact older conversation history' },
+        { name: 'permission', description: 'Switch the permission preset', input: { hint: '<preset>' } },
+        { name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', images: true } },
+      ]
+    }
     if (req.args && req.args.line === '/permission missing') {
       throw { code: 'unknown-command', message: 'no such command' }
+    }
+    if (req.args && req.args.line === '/plan fail') {
+      return { commandId: 'cmd-error', result: { kind: 'error', text: 'plan failed' } }
     }
     return { commandId: 'cmd-1', result: { kind: 'success', text: 'switched' } }
   },
@@ -356,8 +382,32 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
   const liveImageReady = await waitFor(() => got.some((m) => m.kind === 'event' && m.seq === 88), 2000)
   const liveImageEvent = got.find((m) => m.kind === 'event' && m.seq === 88)
   interactionResults.push(['live image reference', liveImageReady && liveImageEvent.event.images[0].attachmentId === 'att-live' && liveImageEvent.event.text === 'live image'])
+  listeners['session/event']({ id: 's1' }, {
+    type: 'command/run',
+    seq: 89,
+    time: 89,
+    data: { commandId: 'cmd-compact', name: 'compact', source: { kind: 'user' } },
+  })
+  listeners['session/event']({ id: 's1' }, {
+    type: 'compaction/summary',
+    seq: 90,
+    time: 90,
+    data: { compactionId: 'compact-1', sourceCommandId: 'cmd-compact', shadowedSeqs: [1, 2, 3], shadowedTokenCount: 7230 },
+  })
+  listeners['session/event']({ id: 's1' }, {
+    type: 'command/done',
+    seq: 91,
+    time: 91,
+    data: { commandId: 'cmd-compact', kind: 'success', text: 'Compacted 3 history items.', sourceEventSeq: 90 },
+  })
+  const commandEventsReady = await waitFor(() => got.some((m) => m.kind === 'event' && m.seq === 91), 2000)
+  const commandRun = got.find((m) => m.kind === 'event' && m.seq === 89)
+  const compactSummary = got.find((m) => m.kind === 'event' && m.seq === 90)
+  const commandDone = got.find((m) => m.kind === 'event' && m.seq === 91)
+  interactionResults.push(['live command lifecycle', commandEventsReady && commandRun.event.name === 'compact' && commandRun.event.commandId === 'cmd-compact' && compactSummary.event.shadowedItemCount === 3 && compactSummary.event.shadowedTokenCount === 7230 && commandDone.event.outcome === 'success' && commandDone.event.sourceEventSeq === 90])
   for (const [name, pass] of interactionResults) console.log((pass ? 'PASS ' : 'FAIL ') + name)
 
+  const deepseekChatOptionId = Buffer.from(JSON.stringify(['deepseek', 'deepseek-chat']), 'utf8').toString('base64url')
   const cases = [
     ['workspaces', { type: 'workspaces' }, (m) => m.kind === 'workspaces'],
     ['sessions', { type: 'sessions' }, (m) => m.kind === 'sessions'],
@@ -379,14 +429,41 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
     ['directory-create missing parent', { type: 'directory-create', path: path.join(directoryTestRoot, 'missing'), name: 'Sources' }, (m) => m.kind === 'error' && m.code === 'directory-create-failed'],
     ['workspace-create', { type: 'workspace-create', path: '/tmp' }, (m) => m.kind === 'workspace-create'],
     ['models', { type: 'models', sessionId: 's1' }, (m) => m.kind === 'models' && m.groups[0].models[0].reasoning.efforts.length === 2],
+    ['commands + skills', { type: 'commands', sessionId: 's1', locale: 'zh-CN' }, (m) => {
+      const commands = m.groups?.[0]?.items || []
+      const skills = m.groups?.[1]?.items || []
+      return m.kind === 'commands' && m.sessionId === 's1' && m.locale === 'zh-CN' && m.groups.length === 2 &&
+        m.groups[0].title === '命令' && m.groups[1].title === '技能' && commands.length === 4 &&
+        commands[0].name === 'compact' && commands[0].ui.kind === 'immediate' && commands[0].ui.submitRequest === 'command-execute' && commands[0].ui.submitText === '/compact' &&
+        commands[1].name === 'permission' && commands[1].ui.kind === 'select' && commands[1].ui.optionsRequest === 'command-options' && commands[1].ui.insertText === '/permission' &&
+        commands[2].ui.kind === 'input' && commands[2].ui.insertText === '/plan ' && commands[2].ui.hint === '[off|message]' && commands[2].ui.displayHint === '描述你的任务以生成计划' && commands[2].ui.submitRequest === 'command-execute' && commands[2].ui.images === true &&
+        commands[3].name === 'model' && commands[3].description === '选择本会话使用的模型' && commands[3].ui.kind === 'select' &&
+        skills.length === 2 && skills[0].id === 'skill:android-cli' && skills[0].ui.kind === 'input' && skills[0].ui.submitRequest === 'message' && skills[0].ui.insertText === '/android-cli ' && skills[0].whenToUse === 'Use for Android device automation' &&
+        skills[1].modelInvocable === false && skills[1].description.startsWith('仅用户 · ') && invokeCalls.some((c) => c.namespace === 'commands' && c.method === 'list' && c.args.agentId === 's1')
+    }],
+    ['commands English locale', { type: 'commands', sessionId: 's1', locale: 'en-US' }, (m) => m.kind === 'commands' && m.locale === 'en' && m.groups[0].title === 'Commands' && m.groups[1].title === 'Skills' && m.groups[0].items[2].ui.displayHint === 'describe your task to generate plan' && m.groups[1].items[1].description.startsWith('user-only · ')],
+    ['commands missing sessionId', { type: 'commands' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
+    ['command-execute compact', { type: 'command-execute', sessionId: 's1', line: '/compact' }, (m) => m.kind === 'command-executed' && m.commandId === 'cmd-1' && m.line === '/compact' && m.result.kind === 'success' && api.promptCalls.length === 0 && invokeCalls.some((c) => c.namespace === 'commands' && c.method === 'execute' && c.args.agentId === 's1' && c.args.line === '/compact' && Array.isArray(c.args.images) && c.args.images.length === 0)],
+    ['command-execute plan args + image', { type: 'command-execute', sessionId: 's1', line: '/plan 帮我完成 Android 端适配', images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=' }] }, (m) => m.kind === 'command-executed' && invokeCalls.some((c) => c.method === 'execute' && c.args.line === '/plan 帮我完成 Android 端适配' && c.args.images.length === 1 && c.args.images[0].data === 'iVBORw0KGgo=') && api.promptCalls.length === 0],
+    ['command-execute handler error', { type: 'command-execute', sessionId: 's1', line: '/plan fail' }, (m) => m.kind === 'command-executed' && m.commandId === 'cmd-error' && m.result.kind === 'error' && m.result.text === 'plan failed'],
+    ['command-execute rejects compact image', { type: 'command-execute', sessionId: 's1', line: '/compact', images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=' }] }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'command-execute'],
+    ['command-execute unknown', { type: 'command-execute', sessionId: 's1', line: '/missing' }, (m) => m.kind === 'error' && m.code === 'unknown-command'],
+    ['command-execute invalid line', { type: 'command-execute', sessionId: 's1', line: 'compact' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
+    ['command-execute missing sessionId', { type: 'command-execute', line: '/compact' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
+    ['command-options permission', { type: 'command-options', sessionId: 's1', command: 'permission' }, (m) => m.kind === 'command-options' && m.command === 'permission' && m.options.length === 2 && m.options[0].id === 'ask' && m.options[0].selected === true && m.options[1].id === 'workspace-write'],
+    ['command-select permission', { type: 'command-select', sessionId: 's1', command: 'permission', optionId: 'workspace-write' }, (m) => m.kind === 'command-selected' && m.command === 'permission' && m.selected.id === 'workspace-write' && m.selected.selected === true && invokeCalls.some((c) => c.method === 'execute' && c.args.line === '/permission workspace-write')],
+    ['command-options model', { type: 'command-options', sessionId: 's1', command: 'model' }, (m) => m.kind === 'command-options' && m.command === 'model' && m.options.length === 1 && m.options[0].id === deepseekChatOptionId && m.options[0].label === 'DeepSeek Chat' && m.options[0].selected === true],
+    ['command-select model', { type: 'command-select', sessionId: 's1', command: 'model', optionId: deepseekChatOptionId }, (m) => m.kind === 'command-selected' && m.command === 'model' && m.selected.label === 'DeepSeek Chat' && m.value.provider === 'deepseek' && m.value.model === 'deepseek-chat'],
+    ['command-options unsupported', { type: 'command-options', sessionId: 's1', command: 'goal' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
     ['select-model', { type: 'select-model', sessionId: 's1', provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' }, (m) => m.kind === 'select-model' && m.selected.reasoningEffort === 'high'],
     ['select-model missing field', { type: 'select-model', sessionId: 's1', provider: 'deepseek' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
-    ['permission-options', { type: 'permission-options', sessionId: 's1' }, (m) => m.kind === 'permission-options' && m.namespace.ns === 'permission' && m.sessionPermissions && m.sessionPermissions.preset === 'ask'],
+    ['permission-options', { type: 'permission-options', sessionId: 's1' }, (m) => m.kind === 'permission-options' && m.namespace.ns === 'permission' && m.sessionPermissions && m.sessionPermissions.currentValue === 'ask'],
     ['permission', { type: 'permission', sessionId: 's1', name: 'code' }, (m) => m.kind === 'permission' && m.set === 'code' && m.commandId === 'cmd-1' && invokeCalls.some((c) => c.namespace === 'commands' && c.method === 'execute' && c.args.line === '/permission code' && c.args.agentId === 's1' && Array.isArray(c.args.images) && c.args.images.length === 0 && !('agent' in c.args)) && api.promptCalls.length === 0],
     ['permission missing name', { type: 'permission', sessionId: 's1' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
     ['permission unknown command', { type: 'permission', sessionId: 's1', name: 'missing' }, (m) => m.kind === 'error' && m.code === 'unknown-command'],
     ['context-usage', { type: 'context-usage', sessionId: 's1' }, (m) => m.kind === 'context-usage' && m.tokenUsage.totals.inputTokens === 10 && m.contextPressure.contextWindow === 128000 && m.asOfSeq === 42],
-['message create in workspace', { type: 'message', text: 'hi', workspaceId: 'w1' }, (m) => m.kind === 'sent' && api._createCalls.length >= 1 && JSON.stringify(api._createCalls[api._createCalls.length - 1]) === JSON.stringify({ workspaceId: 'w1' })],
+    ['message keeps slash text as prompt', { type: 'message', sessionId: 's1', text: '/compact' }, (m) => { const p = api.promptCalls[api.promptCalls.length - 1]; return m.kind === 'sent' && p.content.length === 1 && p.content[0].text === '/compact'; }],
+    ['message create in workspace', { type: 'message', text: 'hi', workspaceId: 'w1' }, (m) => m.kind === 'sent' && api._createCalls.length >= 1 && JSON.stringify(api._createCalls[api._createCalls.length - 1]) === JSON.stringify({ workspaceId: 'w1' })],
     ['message create with cwd', { type: 'message', text: 'hi', cwd: '/tmp' }, (m) => m.kind === 'sent' && JSON.stringify(api._createCalls[api._createCalls.length - 1]) === JSON.stringify({ cwd: '/tmp' })],
     ['message create both -> workspaceId wins', { type: 'message', text: 'hi', workspaceId: 'w2', cwd: '/tmp' }, (m) => m.kind === 'sent' && JSON.stringify(api._createCalls[api._createCalls.length - 1]) === JSON.stringify({ workspaceId: 'w2' })],
     ['message image upload', { type: 'message', sessionId: 's1', text: 'describe this', clientTimeZone: 'Asia/Shanghai', images: [{ mediaType: 'image/jpeg', data: '/9j/2Q==', name: 'photo.jpg' }] }, (m) => { const p = api.promptCalls[api.promptCalls.length - 1]; return m.kind === 'sent' && p.clientTimeZone === 'Asia/Shanghai' && p.content[0].type === 'image' && p.content[0].data === '/9j/2Q==' && p.content[1].text === 'describe this' }],

@@ -1,6 +1,6 @@
 # dsh Mobile Gateway — WebSocket 协议参考
 
-移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问与操作审批、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.6.8）。
+移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问与操作审批、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.6.9）。
 
 - **本机端点**：`ws://127.0.0.1:3080/ws/mobile`（与 dsh web GUI 同端口）
 - **局域网端点**：`ws://<电脑的私有局域网 IP>:3081/ws/mobile`（插件独立监听，只提供经过鉴权的 WebSocket）
@@ -343,9 +343,147 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
 ```
 - `sessionId`：可选。省略时**自动创建新会话**（可用 `workspaceId` 或 `cwd` 指定归属工作区，至多一个，workspaceId 优先）
 - `mode`：`"queue"`（排队，默认）/ `"steer"`（打断当前回合）
-- `text` 以 `/` 开头会被当作**斜杠命令**（如 `/permission ask`），宿主直接执行、**绝不发给模型**
+- `message` 始终是用户 Prompt，Gateway 不会猜测或拦截其中的 `/...`。Host 命令必须使用下文的 `command-execute`；技能（如 `/android-cli 连接设备`）仍作为 `message` 发送，Host 会在 pre-step 阶段注入技能内容。
 - `text` 与 `images` 至少提供一项；因此支持纯图片消息
 - `clientTimeZone`：可选 IANA 时区，例如 `Asia/Shanghai`，宿主会校验后记录到这条用户消息
+
+### 输入菜单目录（命令 + 技能）
+
+目录按会话查询：Agent preset 会影响 Host 命令，会话工作目录会影响可用技能。客户端输入 `/` 后请求：
+
+```json
+{ "type": "commands", "sessionId": "session-abc", "locale": "zh-CN" }
+```
+
+```json
+→ {
+  "kind": "commands",
+  "sessionId": "session-abc",
+  "locale": "zh-CN",
+  "groups": [
+    {
+      "id": "commands",
+      "title": "命令",
+      "items": [
+        {
+          "id": "command:compact",
+          "name": "compact",
+          "description": "Compact older conversation history",
+          "source": "host",
+          "ui": {
+            "kind": "immediate",
+            "submitRequest": "command-execute",
+            "submitText": "/compact"
+          }
+        },
+        {
+          "id": "command:permission",
+          "name": "permission",
+          "description": "Switch the permission preset",
+          "source": "host",
+          "ui": {
+            "kind": "select",
+            "insertText": "/permission",
+            "optionsRequest": "command-options",
+            "selectionRequest": "command-select"
+          }
+        }
+      ]
+    },
+    {
+      "id": "skills",
+      "title": "技能",
+      "items": [
+        {
+          "id": "skill:android-cli",
+          "name": "android-cli",
+          "description": "Provides instructions for installing and using the Android CLI",
+          "source": "skill",
+          "action": "insert",
+          "modelInvocable": true,
+          "ui": {
+            "kind": "input",
+            "insertText": "/android-cli ",
+            "images": true,
+            "submitRequest": "message"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+- `groups` 是客户端的权威渲染结构；分组标题、顺序、条目和交互参数全部由服务端下发。
+- `locale` 可传 `zh-CN` 或英文 locale；服务端返回实际使用的 locale，并为已知命令下发 `ui.displayHint`。客户端优先显示 `displayHint`，缺失时回退到 Host 原始 `hint`。
+- 客户端只解释 `ui`，不按条目名写分支：`immediate` 将 `submitText` 通过 `submitRequest` 发送；`input` 插入 `insertText`、高亮首个 Token 并使用可选的 `displayHint/hint/images`；`select` 插入 `insertText` 并打开通用二级菜单。
+- `source: "host"` / `action: "execute"`：真实 DSH 斜杠命令，必须将 `/<name>` 或 `/<name> <args>` 通过 `command-execute.line` 提交，不得放入 `message.text`。
+- `source: "skill"`：条目来自 DSH `skill.list({sessionId})`。选中时仅按 `ui.insertText` 写入草稿，发送后 Host 会在 pre-step 阶段加载技能内容，不需要专用执行接口。`modelInvocable: false` 的用户专用技能也会被列出，其显示描述由服务端加上“仅用户”标记。
+- `model` 虽然是与官方 Web UI 一致的客户端命令，但选项加载与提交同样走下述通用接口，客户端不需要识别它的名字或模型协议。
+- Host 命令和技能各自保留原始顺序，`model` 客户端命令追加在命令组末尾。若未来 Host 自己注册 `model`，gateway 不会重复追加。
+- `hello.capabilities` 包含 `commands` 时表示服务端支持此目录接口。
+
+#### Host 命令执行
+
+`ui.submitRequest` 为 `command-execute` 时，客户端将完整命令行发送到专用接口：
+
+```json
+{ "type": "command-execute", "sessionId": "session-abc",
+  "line": "/compact", "images": [] }
+→ {
+  "kind": "command-executed",
+  "sessionId": "session-abc",
+  "line": "/compact",
+  "commandId": "command-123",
+  "result": { "kind": "success", "text": "Compacted 24 history items (~7230 tokens)." }
+}
+```
+
+带参数命令仍是 `command-execute`：
+
+```json
+{ "type": "command-execute", "sessionId": "session-abc",
+  "line": "/plan 帮我完成 Android 端适配", "images": [] }
+```
+
+- `line` 必须以 `/` 开头，参数作为同一字符串跟在命令后面。
+- 只有目录中 `ui.images: true` 的命令可携带图片；图片结构与 `message.images` 相同。Gateway 会再次校验。
+- `result.kind: "error"` 表示命令已进入 Host 但处理失败；客户端应保留当前草稿和图片供用户修改。
+- 命令不会生成 `user/message`，也不会进入模型 Prompt。Host 会持久化 `command/run` / `command/done`；`compact` 还会产生 `compaction/start` / `compaction/summary` / `compaction/end`。Gateway 会把这些事件实时转发，客户端据此渲染“正在压缩…”和最终结果。
+
+#### 通用二级菜单
+
+当 `ui.kind` 为 `select` 时，客户端使用 `ui.optionsRequest` 指定的请求类型加载标准化选项：
+
+```json
+{ "type": "command-options", "sessionId": "session-abc", "command": "permission" }
+→ {
+  "kind": "command-options",
+  "sessionId": "session-abc",
+  "command": "permission",
+  "options": [
+    { "id": "ask", "label": "Ask", "description": "Ask before risky operations", "selected": true },
+    { "id": "workspace-write", "label": "Workspace Write", "selected": false }
+  ]
+}
+```
+
+`id` 是服务端拥有的 opaque 值；客户端只负责原样回传。模型选项和权限选项使用完全相同的 `{id,label,detail?,description?,selected}` 结构。
+
+选择后使用 `ui.selectionRequest` 指定的请求类型提交：
+
+```json
+{ "type": "command-select", "sessionId": "session-abc",
+  "command": "permission", "optionId": "workspace-write" }
+→ {
+  "kind": "command-selected",
+  "sessionId": "session-abc",
+  "command": "permission",
+  "selected": { "id": "workspace-write", "label": "Workspace Write", "selected": true }
+}
+```
+
+客户端用 `selected.label/detail` 更新输入框状态栏。`model`、`permission` 的具体查询、校验和写入全部由服务端处理；现有 `models/select-model` 与 `permission-options/permission` 仅作为兼容接口保留。
 
 ### 发送图片
 
@@ -720,6 +858,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 | v0.6.6 | Human-in-the-loop 操作审批：转发 API Gateway approval 请求、一次性允许/拒绝、重连重放与多端最终状态收敛 |
 | v0.6.7 | 订阅已有 Session 时重放待处理 Human-in-the-loop 请求，并增加 Approval 端到端诊断日志与安装版本标记 |
 | v0.6.8 | 会话工作目录受限的文件列表与分块下载：支持图片、文档、IPA、APK 等普通文件，含连接归属、路径越界防护、取消、超时和 SHA-256 完整性校验 |
+| v0.6.9 | 服务端驱动的命令与技能目录：支持本地化 Hint、通用二级选项、专用命令执行，以及 command/compaction 生命周期事件；Host 命令不再作为用户 Prompt 发送 |
 
 ---
 
