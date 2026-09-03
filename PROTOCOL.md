@@ -1,6 +1,6 @@
 # dsh Mobile Gateway — WebSocket 协议参考
 
-移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问与操作审批、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.6.9）。
+移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问与操作审批、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.7.0）。
 
 - **本机端点**：`ws://127.0.0.1:3080/ws/mobile`（与 dsh web GUI 同端口）
 - **局域网端点**：`ws://<电脑的私有局域网 IP>:3081/ws/mobile`（插件独立监听，只提供经过鉴权的 WebSocket）
@@ -77,7 +77,7 @@ const pairingText = Buffer.from(JSON.stringify(payload), 'utf8').toString('base6
 ```json
 { "kind": "paired", "token": "<长期设备 token>",
   "device": { "id": "...", "name": "iPhone", "createdAt": 1787111700000 } }
-{ "kind": "hello", "protocol": 3, "capabilities": ["images", "file-downloads"], "authenticated": true,
+{ "kind": "hello", "protocol": 3, "capabilities": ["images", "commands", "tasks", "goals", "file-downloads"], "authenticated": true,
   "device": { "id": "...", "name": "iPhone" }, "port": 3080, "clients": 1 }
 ```
 
@@ -546,6 +546,8 @@ let image = [
 | `search` | `query` | 会话全文搜索 |
 | `session-stats` | `sessionId` | 执行统计投影（输入框统计条数据源） |
 | `context-usage` | `sessionId` | token 用量 + 上下文占用投影 |
+| `tasks` | `sessionId` | 当前任务列表（`todos` projection） |
+| `goal` | `sessionId` | 当前目标及其 CAS 版本（`goal` projection） |
 
 ### `history` 详细
 ```json
@@ -659,7 +661,93 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 6. 工作区与目录
+## 6. 任务列表与目标
+
+WebUI 中的“任务”与“进行中的目标”分别对应 DSH 的 `todos` 和 `goal` session projection。移动端进入会话后应请求 `tasks` 与 `goal` 取得基线；随后以 `tasks-updated` / `goal-updated` 实时更新 UI。
+
+### 任务列表
+
+```json
+{ "type": "tasks", "sessionId": "session-abc" }
+→ {
+  "kind": "tasks",
+  "sessionId": "session-abc",
+  "asOfSeq": 42,
+  "todos": [
+    { "content": "检查 Android SDK", "status": "completed" },
+    { "content": "创建项目", "status": "in_progress" },
+    { "content": "构建 APK", "status": "pending" }
+  ]
+}
+```
+
+- `todos: null` 表示该会话尚未写入过任务列表；客户端可隐藏任务卡片。
+- 任务由 Agent 的 `todo_write` 更新；移动端只读展示，不能直接改写。
+
+### 当前目标
+
+```json
+{ "type": "goal", "sessionId": "session-abc" }
+→ {
+  "kind": "goal",
+  "sessionId": "session-abc",
+  "asOfSeq": 42,
+  "goal": {
+    "goal": {
+      "id": "goal-opaque-id",
+      "revision": 7,
+      "objective": "初始化一个 Android app",
+      "phase": "active",
+      "maxGoalRounds": 12
+    },
+    "roundsStarted": 3,
+    "createdAt": 1787111700000,
+    "updatedAt": 1787111800000
+  }
+}
+```
+
+`goal: null` 表示没有当前目标。所有目标写操作必须携带刚读取到的 `{id, revision}`。这是 DSH 的 compare-and-set 保护：当 WebUI 或另一台设备已经修改目标时，宿主拒绝陈旧 revision，移动端应重新请求 `goal` 后再提示用户重试。
+
+| type | 参数 | 说明 |
+|---|---|---|
+| `goal-edit` | `sessionId`, `ref`, `objective?`, `maxGoalRounds?` | 修改目标名称（`objective`）或轮数上限，至少提供一项 |
+| `goal-pause` | `sessionId`, `ref` | 暂停当前目标 |
+| `goal-resume` | `sessionId`, `ref` | 继续已暂停/阻塞的目标 |
+| `goal-clear` | `sessionId`, `ref` | 删除当前目标 |
+
+更改目标名称：
+
+```json
+{ "type": "goal-edit", "sessionId": "session-abc",
+  "ref": { "id": "goal-opaque-id", "revision": 7 },
+  "objective": "完成 Android app 初始化" }
+→ { "kind": "goal-edit", "sessionId": "session-abc",
+    "ref": { "id": "goal-opaque-id", "revision": 8 } }
+```
+
+暂停、继续和删除只替换 `type`：
+
+```json
+{ "type": "goal-pause", "sessionId": "session-abc", "ref": { "id": "goal-opaque-id", "revision": 8 } }
+→ { "kind": "goal-pause", "sessionId": "session-abc", "ref": { "id": "goal-opaque-id", "revision": 9 } }
+
+{ "type": "goal-clear", "sessionId": "session-abc", "ref": { "id": "goal-opaque-id", "revision": 9 } }
+→ { "kind": "goal-clear", "sessionId": "session-abc", "cleared": true }
+```
+
+### 实时更新
+
+```json
+{ "kind": "tasks-updated", "sessionId": "session-abc", "asOfSeq": 43, "todos": [ ... ] }
+{ "kind": "goal-updated", "sessionId": "session-abc", "asOfSeq": 44, "goal": { ... } }
+```
+
+服务端只转发 `todos` 与 `goal` projection；客户端按 `asOfSeq` 做高序号覆盖，避免较早推送回写较新的查询结果。
+
+---
+
+## 7. 工作区与目录
 
 | type | 参数 | 说明 |
 |---|---|---|
@@ -689,7 +777,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 7. 模型与思考等级
+## 8. 模型与思考等级
 
 | type | 参数 | 说明 |
 |---|---|---|
@@ -721,7 +809,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 8. 权限控制
+## 9. 权限控制
 
 | type | 参数 | 说明 |
 |---|---|---|
@@ -736,7 +824,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 9. 新会话默认配置
+## 10. 新会话默认配置
 
 | type | 参数 | 说明 |
 |---|---|---|
@@ -754,7 +842,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 10. 分支（fork）
+## 11. 分支（fork）
 
 ```json
 { "type": "fork", "sessionId": "session-abc", "atSeq": 42 }
@@ -765,7 +853,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 11. 宿主信息
+## 12. 宿主信息
 
 | type | 返回 |
 |---|---|
@@ -779,13 +867,14 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 12. 服务端主动推送
+## 13. 服务端主动推送
 
 | kind | 触发时机 |
 |---|---|
 | `paired` | 首次配对成功；仅此一次返回长期设备 token |
-| `hello` | 连接成功：`{ "kind":"hello", "protocol":3, "capabilities":["images","file-downloads"], "authenticated":true, "port":3080, "clients":1 }` |
+| `hello` | 连接成功：`{ "kind":"hello", "protocol":3, "capabilities":["images","commands","tasks","goals","file-downloads"], "authenticated":true, "port":3080, "clients":1 }` |
 | `event` | 任意会话的 agent 输出（见下） |
+| `tasks-updated` / `goal-updated` | 当前会话的任务列表或目标 projection 发生变化 |
 | `question-requested` / `question-resolved` | Human-in-the-loop 问题请求与最终状态 |
 | `approval-requested` / `approval-resolved` | Human-in-the-loop 操作审批请求与最终状态 |
 | `pong` / `subscribed` / `sent` | 对应请求的回复 |
@@ -805,7 +894,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 13. 端到端示例（Postman）
+## 14. 端到端示例（Postman）
 
 1. Connect → 收到 `hello`
 2. `{"type":"sessions"}` → 挑 `sessionId`（或直接下一步自动建）
@@ -818,7 +907,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 14. 安全注意
+## 15. 安全注意
 
 - `/ws/mobile` 的移动网关默认关闭；本机 WebUI 手动开启后，若 5 分钟内没有设备成功连接会自动关闭
 - 网关开启后仍要求已配对设备凭证；不要把 `requireAuth` 设为 `false` 后暴露到网络
@@ -833,7 +922,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 
 ---
 
-## 15. 版本历史（插件）
+## 16. 版本历史（插件）
 
 | 版本 | 新增 |
 |---|---|
@@ -859,6 +948,7 @@ iOS 用 `Data(base64Encoded:)` 解码并按 `attachment.mediaType` 渲染，建�
 | v0.6.7 | 订阅已有 Session 时重放待处理 Human-in-the-loop 请求，并增加 Approval 端到端诊断日志与安装版本标记 |
 | v0.6.8 | 会话工作目录受限的文件列表与分块下载：支持图片、文档、IPA、APK 等普通文件，含连接归属、路径越界防护、取消、超时和 SHA-256 完整性校验 |
 | v0.6.9 | 服务端驱动的命令与技能目录：支持本地化 Hint、通用二级选项、专用命令执行，以及 command/compaction 生命周期事件；Host 命令不再作为用户 Prompt 发送 |
+| v0.7.0 | 任务与 Goal 对齐：任务/Goal 基线查询、`todos`/`goal` 实时投影、Goal 改名、暂停、继续与删除 |
 
 ---
 

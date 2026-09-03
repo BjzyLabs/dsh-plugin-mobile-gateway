@@ -4,7 +4,9 @@
 
 # dsh-plugin-mobile-gateway
 
-DeepSeek Harness 的设备鉴权移动网关，支持会话与实时事件、服务端驱动的命令和技能菜单、Human-in-the-loop、图片及文件传输。安装后，Harness WebUI 左侧边栏会出现“移动设备”入口，可直接开启网关、生成配对二维码和管理可信设备。
+DeepSeek Harness 的设备鉴权移动网关，支持会话与实时事件、任务列表和当前 Goal 同步及管理、服务端驱动的命令和技能菜单、Human-in-the-loop、图片及文件传输。安装后，Harness WebUI 左侧边栏会出现“移动设备”入口，可直接开启网关、生成配对二维码和管理可信设备。
+
+> v0.7.0：移动端现可与 WebUI 对齐展示任务列表和当前 Goal；支持 Goal 改名、暂停、继续和删除，并通过实时 projection 与 revision 校验处理多设备并发更新。
 
 - WebSocket：`/ws/mobile`
 - 局域网：`ws://<局域网 IP>:3081/ws/mobile`

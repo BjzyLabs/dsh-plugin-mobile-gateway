@@ -32,6 +32,7 @@ function fakeApi() {
   const settingsUpdates = []
   const respondCalls = []
   const muxFrames = []
+  const goalCalls = []
   const imageAttachment = {
     attachmentId: 'att-image-1',
     mediaType: 'image/png',
@@ -84,11 +85,20 @@ function fakeApi() {
       },
     },
   ]
+  const recordGoalCall = (method) => async (request) => {
+    goalCalls.push({ method, payload: request.payload })
+    const value = method === 'clear'
+      ? { cleared: true }
+      : { ref: { id: request.payload.ref.id, revision: request.payload.ref.revision + 1 } }
+    return { rpcId: 'r', result: { ok: true, value } }
+  }
   return {
     promptCalls,
     settingsUpdates,
     respondCalls,
+    goalCalls,
     get _createCalls() { return createCalls },
+    get _muxFrames() { return muxFrames },
     events: {
       async *mux(_request, signal) {
         for (const frame of initialQuestions) yield frame
@@ -163,6 +173,12 @@ function fakeApi() {
       ] } } } },
       async update(req) { settingsUpdates.push(req.payload); return { rpcId: 'r', result: { ok: true, value: { ns: req.payload.ns, value: req.payload.patch, revision: 2 } } } },
     },
+    goals: {
+      edit: recordGoalCall('edit'),
+      pause: recordGoalCall('pause'),
+      resume: recordGoalCall('resume'),
+      clear: recordGoalCall('clear'),
+    },
     sessions: {
       async list() {
         return {
@@ -188,7 +204,7 @@ function fakeApi() {
           { type: 'request/header', seq: 6, time: 6, data: { header: { system: 'sys'.repeat(2000) }, reason: 'initial' } },
           { type: 'assistant/message', seq: 7, time: 7, data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'done' }] } } },
         ]
-        return { rpcId: 'r', result: { ok: true, value: { events: fakeEvents.map((e) => ({ event: e })), hasMore: false, projections: { asOfSeq: 42, values: { tokenUsage: { totals: { inputTokens: 10, outputTokens: 5 }, last: null }, contextPressure: { contextWindow: 128000, pressureTokens: 1500, surfaceTokens: 2000 }, permissions: { options: [{ value: 'ask', name: 'Ask', description: 'Ask before risky operations' }, { value: 'workspace-write', name: 'Workspace Write' }], currentValue: 'ask' }, sessionStats: { turns: 6, steps: 69, llmMs: 2280000, toolMs: 41400, ttftMs: 2600, ttftSteps: 1, decodeMs: 5000, decodeTokens: 385, lastTurn: 6, openStep: null, pendingCalls: {} } } } } } }
+        return { rpcId: 'r', result: { ok: true, value: { events: fakeEvents.map((e) => ({ event: e })), hasMore: false, projections: { asOfSeq: 42, values: { tokenUsage: { totals: { inputTokens: 10, outputTokens: 5 }, last: null }, contextPressure: { contextWindow: 128000, pressureTokens: 1500, surfaceTokens: 2000 }, permissions: { options: [{ value: 'ask', name: 'Ask', description: 'Ask before risky operations' }, { value: 'workspace-write', name: 'Workspace Write' }], currentValue: 'ask' }, sessionStats: { turns: 6, steps: 69, llmMs: 2280000, toolMs: 41400, ttftMs: 2600, ttftSteps: 1, decodeMs: 5000, decodeTokens: 385, lastTurn: 6, openStep: null, pendingCalls: {} }, todos: [{ content: 'Inspect Android CLI/SDK environment', status: 'completed' }, { content: 'Get android CLI running', status: 'in_progress' }, { content: 'Choose project template', status: 'pending' }], goal: { goal: { id: 'goal-1', revision: 7, objective: '初始化一个 Android app', phase: 'active', maxGoalRounds: 12 }, roundsStarted: 3, createdAt: 1, updatedAt: 2 } } } } } }
       },
       async search() { return { rpcId: 'r', result: { ok: true, value: { items: [], hasMore: false } } } },
       async attachment(req) {
@@ -323,6 +339,31 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
   ws.send(JSON.stringify({ type: 'approval-response', rpcId: 'approval-rpc-2', sessionId: 's2', approvalId: 'approval-2', outcome: 'later' }))
   const badApprovalReady = await waitFor(() => got.some((m) => m.kind === 'error' && m.requestType === 'approval-response'), 2000)
   interactionResults.push(['approval invalid outcome', badApprovalReady])
+
+  api._muxFrames.push({
+    rpcId: 'projection-todos',
+    payload: {
+      type: 'session/projection',
+      sessionId: 's1',
+      key: 'todos',
+      value: [{ content: 'Inspect Android CLI/SDK environment', status: 'completed' }],
+      seq: 93,
+    },
+  })
+  api._muxFrames.push({
+    rpcId: 'projection-goal',
+    payload: {
+      type: 'session/projection',
+      sessionId: 's1',
+      key: 'goal',
+      value: { goal: { id: 'goal-1', revision: 8, objective: '初始化一个 Android app', phase: 'paused', maxGoalRounds: 12 }, roundsStarted: 3, createdAt: 1, updatedAt: 3 },
+      seq: 94,
+    },
+  })
+  const tasksUpdated = await waitFor(() => got.some((m) => m.kind === 'tasks-updated' && m.asOfSeq === 93), 2000)
+  const goalUpdated = await waitFor(() => got.some((m) => m.kind === 'goal-updated' && m.asOfSeq === 94), 2000)
+  interactionResults.push(['live task projection', tasksUpdated && got.find((m) => m.kind === 'tasks-updated' && m.asOfSeq === 93).todos[0].status === 'completed'])
+  interactionResults.push(['live goal projection', goalUpdated && got.find((m) => m.kind === 'goal-updated' && m.asOfSeq === 94).goal.goal.phase === 'paused'])
 
   ws.send(JSON.stringify({ type: 'file-list', requestId: 'files-1', sessionId: 's1' }))
   const fileListReady = await waitFor(() => got.some((m) => m.kind === 'file-list' && m.requestId === 'files-1'), 2000)
@@ -462,6 +503,13 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
     ['permission missing name', { type: 'permission', sessionId: 's1' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
     ['permission unknown command', { type: 'permission', sessionId: 's1', name: 'missing' }, (m) => m.kind === 'error' && m.code === 'unknown-command'],
     ['context-usage', { type: 'context-usage', sessionId: 's1' }, (m) => m.kind === 'context-usage' && m.tokenUsage.totals.inputTokens === 10 && m.contextPressure.contextWindow === 128000 && m.asOfSeq === 42],
+    ['tasks', { type: 'tasks', sessionId: 's1' }, (m) => m.kind === 'tasks' && m.sessionId === 's1' && m.asOfSeq === 42 && m.todos.length === 3 && m.todos[1].status === 'in_progress'],
+    ['goal', { type: 'goal', sessionId: 's1' }, (m) => m.kind === 'goal' && m.sessionId === 's1' && m.asOfSeq === 42 && m.goal.goal.objective === '初始化一个 Android app' && m.goal.goal.phase === 'active'],
+    ['goal-edit', { type: 'goal-edit', sessionId: 's1', ref: { id: 'goal-1', revision: 7 }, objective: '完成 Android app 初始化' }, (m) => m.kind === 'goal-edit' && m.ref.revision === 8 && api.goalCalls.some((c) => c.method === 'edit' && c.payload.objective === '完成 Android app 初始化')],
+    ['goal-pause', { type: 'goal-pause', sessionId: 's1', ref: { id: 'goal-1', revision: 8 } }, (m) => m.kind === 'goal-pause' && m.ref.revision === 9 && api.goalCalls.some((c) => c.method === 'pause')],
+    ['goal-resume', { type: 'goal-resume', sessionId: 's1', ref: { id: 'goal-1', revision: 9 } }, (m) => m.kind === 'goal-resume' && m.ref.revision === 10 && api.goalCalls.some((c) => c.method === 'resume')],
+    ['goal-clear', { type: 'goal-clear', sessionId: 's1', ref: { id: 'goal-1', revision: 10 } }, (m) => m.kind === 'goal-clear' && m.cleared === true && api.goalCalls.some((c) => c.method === 'clear')],
+    ['goal mutation missing ref', { type: 'goal-pause', sessionId: 's1' }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'goal-pause'],
     ['message keeps slash text as prompt', { type: 'message', sessionId: 's1', text: '/compact' }, (m) => { const p = api.promptCalls[api.promptCalls.length - 1]; return m.kind === 'sent' && p.content.length === 1 && p.content[0].text === '/compact'; }],
     ['message create in workspace', { type: 'message', text: 'hi', workspaceId: 'w1' }, (m) => m.kind === 'sent' && api._createCalls.length >= 1 && JSON.stringify(api._createCalls[api._createCalls.length - 1]) === JSON.stringify({ workspaceId: 'w1' })],
     ['message create with cwd', { type: 'message', text: 'hi', cwd: '/tmp' }, (m) => m.kind === 'sent' && JSON.stringify(api._createCalls[api._createCalls.length - 1]) === JSON.stringify({ cwd: '/tmp' })],

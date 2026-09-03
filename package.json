@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-mobile-gateway",
-  "version": "0.6.9",
-  "description": "Authenticated mobile gateway for DeepSeek Harness with server-driven commands, skills, approvals, and file transfers",
+  "version": "0.7.0",
+  "description": "Secure mobile gateway for DeepSeek Harness with realtime sessions, tasks, goals, commands, approvals, and file transfers",
   "main": "lib/index.mjs",
   "files": [
     "bin",
