@@ -1,6 +1,6 @@
 # dsh Mobile Gateway — WebSocket 协议参考
 
-移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问与操作审批、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.7.0）。
+移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问与操作审批、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.7.1）。
 
 - **本机端点**：`ws://127.0.0.1:3080/ws/mobile`（与 dsh web GUI 同端口）
 - **局域网端点**：`ws://<电脑的私有局域网 IP>:3081/ws/mobile`（插件独立监听，只提供经过鉴权的 WebSocket）
@@ -162,11 +162,11 @@ Human-in-the-loop 分为两条独立通道：
 - **提问**：Agent 的 `ask_user_question` 工具向用户收集答案。
 - **审批**：高风险工具操作（例如沙箱升权）请求一次性允许或拒绝。
 
-二者都是 API Gateway 的临时请求，不属于持久化的 `session/event`，且都必须以其原始 `rpcId` 通过专用响应帧回答，不能作为普通 `message` 发送。
+二者都是 Host waterfall 的临时请求，不属于持久化的 `session/event`，且都必须以插件为该次请求生成的 `rpcId` 通过专用响应帧回答，不能作为普通 `message` 发送。该内部实现不改变移动端帧格式。
 
 ### 3.1 提问与回答
 
-Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway 的 `events.mux()` 收到临时的待回答请求，并推送给移动端。
+Agent 调用 DSH 的 `ask_user_question` 工具时，插件直接接入 Host 的 `user-questions/request` waterfall，并把临时请求投影给移动端。若没有可处理该 Session 的移动连接，插件调用 `next()`，由 WebUI 或后续 Host answerer 处理。
 
 #### `question-requested` — 服务端推送问题
 
@@ -191,7 +191,7 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
 }
 ```
 
-- `rpcId`：API Gateway 为这一整批问题生成的稳定 ID。回答或取消时必须原样返回，客户端不得自行生成。
+- `rpcId`：移动网关为这一整批问题生成的不透明稳定 ID。回答或取消时必须原样返回，客户端不得自行生成或解析。
 - `questions`：一次工具调用中的完整问题批次；可能包含多题。
 - `id`：问题 ID，必须在对应答案中原样返回。
 - `header` / `detail`：可选展示信息。
@@ -226,7 +226,7 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
 }
 ```
 
-提交规则由 API Gateway 严格校验：
+提交规则由移动网关在进入 Host waterfall 前严格校验：
 
 - 必须一次提交这一批中的全部问题，`answers` 数量、顺序和 `id` 必须与 `questions` 一致。
 - `selected` 中的值必须与原始 `options[].label` 完全一致，且不能重复。
@@ -264,13 +264,13 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
   "outcome":"answered" }
 ```
 
-`outcome` 为 `answered` 或 `cancelled`。WebUI、iOS 或其他客户端中的第一个合法响应获胜；所有移动连接都会收到最终状态并应关闭对应选择界面。移动端断线重连后，API Gateway 会重放仍待回答的问题；DSH 进程重启则会取消这些仅存在于运行时的问题。
+`outcome` 为 `answered` 或 `cancelled`。存在匹配 Session 的移动连接时，移动网关优先认领请求，多台移动设备中的第一个合法响应获胜；若没有匹配连接或连接全部断开，则通过 `next()` 回退给 WebUI/后续 Host answerer。所有移动连接都会收到由移动端完成的最终状态并应关闭对应选择界面。重连时网关会重放仍由它持有的问题；DSH 进程重启则会取消这些仅存在于运行时的问题。
 
 ---
 
 ### 3.2 操作审批
 
-当 DSH 的工具管线要求人工授权时，插件会从 API Gateway 收到一次 `approval/requested`。这正是 Web UI 中“等待审批”卡片对应的事件：`reason` 是面向用户的审批说明，`toolName` 标识请求操作的工具，`callId` 可用于与实时工具调用轨迹关联。
+当 DSH 的工具管线要求人工授权时，插件会接入一次 Host `approval/request` waterfall，并向移动端投影为 `approval-requested`。这正是 Web UI 中“等待审批”卡片对应的能力：`reason` 是面向用户的审批说明，`toolName` 标识请求操作的工具，`callId` 可用于与实时工具调用轨迹关联。
 
 #### `approval-requested` — 服务端推送待审批操作
 
@@ -288,7 +288,7 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
 ```
 
 - `rpcId`：本次可回答请求的稳定 RPC ID；提交决定时必须原样返回。
-- `approvalId`：审批审计 ID；同样必须原样返回，并用于将最终状态关联到本地审批卡片。
+- `approvalId`：移动网关生成的本次审批关联 ID；同样必须原样返回，并用于将最终状态关联到本地审批卡片。
 - `toolName`：请求审批的工具名。
 - `callId` / `reason`：可选。前者可关联工具调用，后者应直接显示为待审批原因。
 - `replay: true`：表示当前仍未决定的审批在移动端连接或切换 Session 后重放。客户端应按 `rpcId` 去重。
@@ -321,7 +321,7 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
   "approvalId":"approval-1", "outcome":"allowed-once", "accepted":true }
 ```
 
-如果 Web UI 或另一台移动设备已经先作出决定，则回执为 `accepted:false`，并附带 `reason:"not-pending"`。收到错误帧或未被接受的回执时，客户端应保留当前状态，等待最终状态或重新打开事件流。
+如果另一台移动设备已经先作出决定，或请求已经回退给 WebUI/后续 answerer，则回执为 `accepted:false`，并附带 `reason:"not-pending"`。收到错误帧或未被接受的回执时，客户端应保留当前状态，等待最终状态或重新打开事件流。
 
 #### `approval-resolved` — 服务端广播最终状态
 
@@ -330,7 +330,7 @@ Agent 调用 DSH 的 `ask_user_question` 工具时，插件通过 API Gateway �
   "approvalId":"approval-1", "outcome":"allowed-once" }
 ```
 
-`outcome` 为 `allowed-once`、`rejected`、`cancelled` 或 `unavailable`。所有移动连接都会收到最终状态并关闭对应审批卡片。移动端断线重连后，API Gateway 会重放仍待决定的审批；已决审批不会重放。
+`outcome` 为 `allowed-once`、`rejected`、`cancelled` 或 `unavailable`。所有移动连接都会收到由移动网关完成的最终状态并关闭对应审批卡片。移动端断线重连后，网关会重放仍由它持有的审批；已决或已回退的审批不会重放。
 
 ---
 
@@ -949,6 +949,7 @@ WebUI 中的“任务”与“进行中的目标”分别对应 DSH 的 `todos` 
 | v0.6.8 | 会话工作目录受限的文件列表与分块下载：支持图片、文档、IPA、APK 等普通文件，含连接归属、路径越界防护、取消、超时和 SHA-256 完整性校验 |
 | v0.6.9 | 服务端驱动的命令与技能目录：支持本地化 Hint、通用二级选项、专用命令执行，以及 command/compaction 生命周期事件；Host 命令不再作为用户 Prompt 发送 |
 | v0.7.0 | 任务与 Goal 对齐：任务/Goal 基线查询、`todos`/`goal` 实时投影、Goal 改名、暂停、继续与删除 |
+| v0.7.1 | DSH v0.1.2-rc.1 兼容：内部迁移至 Remote Gateway 与 Host waterfall，移除 APIProxy 依赖；`dsh-mobile-v1` 保持不变 |
 
 ---
 

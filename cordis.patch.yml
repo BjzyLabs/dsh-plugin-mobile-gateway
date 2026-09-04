@@ -1,7 +1,7 @@
 # dsh-plugin-mobile-gateway bundle patch.
 # Applied after dsh-base and dsh-web-app: inserts the persistent /ws/mobile
-# gateway row into the host plane (it consumes the host `webServer` service
-# and the host `session/event` feed, and publishes no service of its own).
+# gateway row into the host plane (it consumes `webServer`, the Host Remote
+# Gateway and the `session/event` feed, and publishes no service of its own).
 - insert:
     - id: mobile-gateway
       name: 'dsh-plugin-mobile-gateway'

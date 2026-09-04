@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-mobile-gateway",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Secure mobile gateway for DeepSeek Harness with realtime sessions, tasks, goals, commands, approvals, and file transfers",
   "main": "lib/index.mjs",
   "files": [
@@ -26,7 +26,7 @@
   },
   "bin": "bin/setup-ip.mjs",
   "scripts": {
-    "test": "node test/setup-ip.test.mjs && node test/gateway.test.mjs && node test/auth.test.mjs && node test/lan.test.mjs"
+    "test": "node test/setup-ip.test.mjs && node test/host-adapter.test.mjs && node test/gateway.test.mjs && node test/auth.test.mjs && node test/lan.test.mjs"
   },
   "exports": {
     ".": "./lib/index.mjs",

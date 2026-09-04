@@ -65,8 +65,17 @@ async function waitForLanStatus(base) {
   })
   const ctx = {
     webServer,
-    apiProxy: {},
-    typertGateway: {},
+    typertGateway: {
+      async invoke() { throw new Error('unexpected Remote invocation') },
+      async stream(request) {
+        return (async function* () {
+          if (request.namespace === 'session' && request.method === 'control') {
+            yield { type: 'baseline', value: { queues: {}, jobs: {}, projections: {} } }
+            while (!request.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 5))
+          }
+        })()
+      },
+    },
     agentDefaultModel: {},
     on() { return () => {} },
     effect(factory) { disposePlugin = factory() },

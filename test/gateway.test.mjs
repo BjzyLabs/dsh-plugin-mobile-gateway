@@ -30,8 +30,6 @@ function fakeApi() {
   const promptCalls = []
   const createCalls = []
   const settingsUpdates = []
-  const respondCalls = []
-  const muxFrames = []
   const goalCalls = []
   const imageAttachment = {
     attachmentId: 'att-image-1',
@@ -41,50 +39,6 @@ function fakeApi() {
     height: 2,
     name: 'sample.png',
   }
-  const initialQuestions = [
-    {
-      rpcId: 'question-rpc-1',
-      payload: {
-        type: 'question/requested',
-        sessionId: 's1',
-        questions: [
-          { id: 'direction', header: 'Research', question: 'Choose a direction', options: [{ label: 'Core', description: 'Architecture' }, { label: 'Mobile' }], multiSelect: false },
-          { id: 'detail', question: 'Anything else?', options: [], multiSelect: false },
-        ],
-      },
-    },
-    {
-      rpcId: 'question-rpc-2',
-      payload: {
-        type: 'question/requested',
-        sessionId: 's2',
-        questions: [{ id: 'confirm', question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }], multiSelect: false }],
-      },
-    },
-  ]
-  const initialApprovals = [
-    {
-      rpcId: 'approval-rpc-1',
-      payload: {
-        type: 'approval/requested',
-        sessionId: 's1',
-        approvalId: 'approval-1',
-        toolName: 'bash',
-        callId: 'call-1',
-        reason: 'escalate sandbox to danger-full-access',
-      },
-    },
-    {
-      rpcId: 'approval-rpc-2',
-      payload: {
-        type: 'approval/requested',
-        sessionId: 's2',
-        approvalId: 'approval-2',
-        toolName: 'bash',
-        reason: 'write outside the workspace',
-      },
-    },
-  ]
   const recordGoalCall = (method) => async (request) => {
     goalCalls.push({ method, payload: request.payload })
     const value = method === 'clear'
@@ -95,50 +49,8 @@ function fakeApi() {
   return {
     promptCalls,
     settingsUpdates,
-    respondCalls,
     goalCalls,
     get _createCalls() { return createCalls },
-    get _muxFrames() { return muxFrames },
-    events: {
-      async *mux(_request, signal) {
-        for (const frame of initialQuestions) yield frame
-        for (const frame of initialApprovals) yield frame
-        while (!signal.aborted) {
-          if (muxFrames.length > 0) yield muxFrames.shift()
-          else await new Promise((resolve) => setTimeout(resolve, 5))
-        }
-      },
-    },
-    async respond(message) {
-      respondCalls.push(message)
-      const approval = message.result.ok && message.result.value && typeof message.result.value.approvalId === 'string'
-      if (approval) {
-        muxFrames.push({
-          rpcId: `resolved-${respondCalls.length}`,
-          payload: {
-            type: 'approval/resolved',
-            sessionId: message.result.value.sessionId,
-            approvalId: message.result.value.approvalId,
-            outcome: message.result.value.outcome,
-          },
-        })
-        return { accepted: true }
-      }
-      const outcome = message.result.ok ? 'answered' : 'cancelled'
-      muxFrames.push({
-        rpcId: `resolved-${respondCalls.length}`,
-        payload: {
-          type: 'question/resolved',
-          sessionId: message.result.ok ? message.result.value.sessionId : 's2',
-          questionRpcId: message.rpcId,
-          outcome,
-        },
-      })
-      return { accepted: true }
-    },
-    host: {
-      async describe() { return { rpcId: 'r', result: { ok: true, value: { version: 't', cwd: '/Users/lichaofan', attachedSessions: 1, canOpenPath: true } } } },
-    },
     skills: {
       async list() {
         return {
@@ -231,8 +143,8 @@ const ctx = {
   effect(fn) { disposer = fn() },
 }
 ctx.webServer = webServer
-ctx.apiProxy = api
 const invokeCalls = []
+const controlFrames = []
 const savedSelections = []
 ctx.agentDefaultModel = {
   currentSelection() { return { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' } },
@@ -248,13 +160,78 @@ ctx.typertGateway = {
         { name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', images: true } },
       ]
     }
-    if (req.args && req.args.line === '/permission missing') {
+    if (req.namespace === 'commands' && req.args && req.args.line === '/permission missing') {
       throw { code: 'unknown-command', message: 'no such command' }
     }
-    if (req.args && req.args.line === '/plan fail') {
+    if (req.namespace === 'commands' && req.args && req.args.line === '/plan fail') {
       return { commandId: 'cmd-error', result: { kind: 'error', text: 'plan failed' } }
     }
-    return { commandId: 'cmd-1', result: { kind: 'success', text: 'switched' } }
+    if (req.namespace === 'commands') return { commandId: 'cmd-1', result: { kind: 'success', text: 'switched' } }
+    const request = req.args.request || {}
+    const unwrap = async (method, payload = request) => (await method({ payload })).result.value
+    if (req.namespace === 'session') {
+      if (req.method === 'list') return unwrap(api.sessions.list)
+      if (req.method === 'search') return unwrap(api.sessions.search)
+      if (req.method === 'create') return unwrap(api.sessions.create, request)
+      if (req.method === 'prompt') {
+        const { requestId: _requestId, ...payload } = request
+        return unwrap(api.sessions.prompt, payload)
+      }
+      if (req.method === 'attachment') return unwrap(api.sessions.attachment)
+      if (req.method === 'fork') return unwrap(api.sessions.fork)
+      if (req.method === 'selectModel') return unwrap(api.sessions.selectModel)
+      if (req.method === 'modelCatalog') {
+        const catalog = await unwrap(api.sessions.models, {})
+        return {
+          default: ctx.agentDefaultModel.currentSelection(),
+          routableProviders: catalog.groups.map((group) => group.id),
+          groups: catalog.groups,
+          failures: catalog.failures,
+        }
+      }
+      if (req.method === 'canOpenWorkspacePath') return true
+    }
+    if (req.namespace === 'workspace' && req.method === 'create') return unwrap(api.workspace.create)
+    if (req.namespace === 'settings' && req.method === 'describe') return unwrap(api.settings.describe, {})
+    if (req.namespace === 'settings' && req.method === 'update') {
+      return unwrap(api.settings.update, { ns: req.args.ns, patch: req.args.patch })
+    }
+    if (req.namespace === 'skills' && req.method === 'list') return unwrap(api.skills.list)
+    if (req.namespace === 'agentPresets' && req.method === 'list') return unwrap(api.agentPresets.list, {})
+    if (req.namespace === 'llm' && req.method === 'listConfigurableProviders') {
+      return (await unwrap(api.llm.providers, {})).providers
+    }
+    if (req.namespace === 'goals') {
+      const payload = { sessionId: req.args.agentId, ref: req.args.ref, ...(req.args.request || {}) }
+      const value = await unwrap(api.goals[req.method], payload)
+      return req.method === 'clear'
+        ? { id: req.args.ref.id, revision: req.args.ref.revision + 1 }
+        : { id: value.ref.id, revision: value.ref.revision }
+    }
+    throw new Error(`unexpected Remote call ${req.namespace}/${req.method}`)
+  },
+  async stream(req) {
+    if (req.namespace === 'workspace' && req.method === 'follow') {
+      const value = (await api.workspace.list()).result.value
+      return (async function* () { yield { type: 'baseline', value } })()
+    }
+    if (req.namespace === 'session' && req.method === 'follow') {
+      const value = (await api.sessions.history()).result.value
+      const records = value.events.map((entry) => ({ type: 'event', event: entry.event }))
+      return (async function* () {
+        yield { type: 'snapshot', header: { version: 1, id: req.args.request.address.sessionId }, cursor: 91, records, hasMore: value.hasMore, projections: value.projections }
+      })()
+    }
+    if (req.namespace === 'session' && req.method === 'control') {
+      return (async function* () {
+        yield { type: 'baseline', value: { queues: {}, jobs: {}, projections: {} } }
+        while (!req.signal.aborted) {
+          if (controlFrames.length > 0) yield controlFrames.shift()
+          else await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      })()
+    }
+    throw new Error(`unexpected Remote stream ${req.namespace}/${req.method}`)
   },
 }
 plugin.apply(ctx, {
@@ -276,89 +253,122 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
   await waitFor(() => got.length > 0, 2000)
 
   const interactionResults = []
+  const questionOne = listeners['user-questions/request']({
+    agent: { id: 's1' },
+    questions: [
+      { id: 'direction', header: 'Research', question: 'Choose a direction', options: [{ label: 'Core', description: 'Architecture' }, { label: 'Mobile' }], multiSelect: false },
+      { id: 'detail', question: 'Anything else?', options: [], multiSelect: false },
+    ],
+  }, () => Promise.reject(new Error('unexpected question fallback')))
+  const questionTwo = listeners['user-questions/request']({
+    agent: { id: 's2' },
+    questions: [{ id: 'confirm', question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }], multiSelect: false }],
+  }, () => Promise.reject(new Error('unexpected question fallback'))).then(
+    (value) => value,
+    (error) => error,
+  )
+  const approvalOne = listeners['approval/request']({
+    agent: { id: 's1' },
+    toolName: 'bash',
+    callId: 'call-1',
+    reason: 'escalate sandbox to danger-full-access',
+  }, () => Promise.resolve('unavailable'))
+  const approvalTwo = listeners['approval/request']({
+    agent: { id: 's2' },
+    toolName: 'bash',
+    reason: 'write outside the workspace',
+  }, () => Promise.resolve('unavailable'))
+
   const requestedReady = await waitFor(() => got.filter((m) => m.kind === 'question-requested').length === 2, 2000)
-  const requested = got.find((m) => m.kind === 'question-requested' && m.rpcId === 'question-rpc-1')
-  interactionResults.push(['question requested + replay', requestedReady && requested && requested.replay === true && requested.questions.length === 2 && requested.questions[0].options[0].description === 'Architecture'])
+  const requested = got.find((m) => m.kind === 'question-requested' && m.sessionId === 's1')
+  const requestedTwo = got.find((m) => m.kind === 'question-requested' && m.sessionId === 's2')
+  interactionResults.push(['question requested', requestedReady && requested && requested.questions.length === 2 && requested.questions[0].options[0].description === 'Architecture'])
 
   ws.send(JSON.stringify({
     type: 'question-answer',
-    rpcId: 'question-rpc-1',
+    rpcId: requested.rpcId,
+    sessionId: 's1',
+    answers: [
+      { id: 'direction', selected: ['Not offered'] },
+      { id: 'detail', selected: [] },
+    ],
+  }))
+  const invalidAnswerReady = await waitFor(() => got.some((m) => m.kind === 'error' && m.requestType === 'question-answer' && m.code === 'bad-response'), 2000)
+  interactionResults.push(['question answer validation', invalidAnswerReady])
+
+  ws.send(JSON.stringify({
+    type: 'question-answer',
+    rpcId: requested.rpcId,
     sessionId: 's1',
     answers: [
       { id: 'direction', selected: ['Mobile'] },
       { id: 'detail', selected: [], custom: 'Security' },
     ],
   }))
-  const answerReady = await waitFor(() => got.some((m) => m.kind === 'question-response' && m.rpcId === 'question-rpc-1'), 2000)
-  const answerReceipt = got.find((m) => m.kind === 'question-response' && m.rpcId === 'question-rpc-1')
-  const answerCall = api.respondCalls.find((m) => m.rpcId === 'question-rpc-1')
-  interactionResults.push(['question answer', answerReady && answerReceipt.accepted === true && answerCall.type === 'client-response' && answerCall.result.value.answer.answers[1].custom === 'Security'])
-  const answeredResolved = await waitFor(() => got.some((m) => m.kind === 'question-resolved' && m.rpcId === 'question-rpc-1' && m.outcome === 'answered'), 2000)
+  const answerReady = await waitFor(() => got.some((m) => m.kind === 'question-response' && m.rpcId === requested.rpcId), 2000)
+  const answerReceipt = got.find((m) => m.kind === 'question-response' && m.rpcId === requested.rpcId)
+  const answerValue = await questionOne
+  interactionResults.push(['question answer', answerReady && answerReceipt.accepted === true && answerValue.answers[1].custom === 'Security'])
+  const answeredResolved = await waitFor(() => got.some((m) => m.kind === 'question-resolved' && m.rpcId === requested.rpcId && m.outcome === 'answered'), 2000)
   interactionResults.push(['question answered resolution', answeredResolved])
 
   const approvalRequestedReady = await waitFor(() => got.filter((m) => m.kind === 'approval-requested').length === 2, 2000)
-  const requestedApproval = got.find((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-1')
-  interactionResults.push(['approval requested + replay', approvalRequestedReady && requestedApproval && requestedApproval.replay === true && requestedApproval.approvalId === 'approval-1' && requestedApproval.toolName === 'bash' && requestedApproval.callId === 'call-1' && requestedApproval.reason === 'escalate sandbox to danger-full-access'])
+  const requestedApproval = got.find((m) => m.kind === 'approval-requested' && m.sessionId === 's1')
+  const requestedApprovalTwo = got.find((m) => m.kind === 'approval-requested' && m.sessionId === 's2')
+  interactionResults.push(['approval requested', approvalRequestedReady && requestedApproval && requestedApproval.toolName === 'bash' && requestedApproval.callId === 'call-1' && requestedApproval.reason === 'escalate sandbox to danger-full-access'])
 
-  const approvalReplayCount = got.filter((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-2').length
+  const approvalReplayCount = got.filter((m) => m.kind === 'approval-requested' && m.rpcId === requestedApprovalTwo.rpcId).length
   ws.send(JSON.stringify({ type: 'subscribe', sessionId: 's2' }))
-  const subscribedApprovalReady = await waitFor(() => got.filter((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-2').length > approvalReplayCount, 2000)
-  const subscribedApproval = got.filter((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-2').at(-1)
-  const wrongSessionApprovalCount = got.filter((m) => m.kind === 'approval-requested' && m.rpcId === 'approval-rpc-1').length
+  const subscribedApprovalReady = await waitFor(() => got.filter((m) => m.kind === 'approval-requested' && m.rpcId === requestedApprovalTwo.rpcId).length > approvalReplayCount, 2000)
+  const subscribedApproval = got.filter((m) => m.kind === 'approval-requested' && m.rpcId === requestedApprovalTwo.rpcId).at(-1)
+  const wrongSessionApprovalCount = got.filter((m) => m.kind === 'approval-requested' && m.rpcId === requestedApproval.rpcId).length
   interactionResults.push(['approval replayed when existing session is opened', subscribedApprovalReady && subscribedApproval && subscribedApproval.replay === true && wrongSessionApprovalCount === 1])
   ws.send(JSON.stringify({ type: 'unsubscribe' }))
   await waitFor(() => got.some((m) => m.kind === 'subscribed' && m.sessionId === null), 2000)
 
   ws.send(JSON.stringify({
     type: 'approval-response',
-    rpcId: 'approval-rpc-1',
+    rpcId: requestedApproval.rpcId,
     sessionId: 's1',
-    approvalId: 'approval-1',
+    approvalId: requestedApproval.approvalId,
     outcome: 'allowed-once',
   }))
-  const approvalAllowedReady = await waitFor(() => got.some((m) => m.kind === 'approval-response' && m.rpcId === 'approval-rpc-1'), 2000)
-  const approvalAllowedReceipt = got.find((m) => m.kind === 'approval-response' && m.rpcId === 'approval-rpc-1')
-  const approvalAllowedCall = api.respondCalls.find((m) => m.rpcId === 'approval-rpc-1')
-  interactionResults.push(['approval allowed once', approvalAllowedReady && approvalAllowedReceipt.accepted === true && approvalAllowedReceipt.outcome === 'allowed-once' && approvalAllowedCall.type === 'client-response' && approvalAllowedCall.result.ok === true && approvalAllowedCall.result.value.approvalId === 'approval-1' && approvalAllowedCall.result.value.outcome === 'allowed-once'])
-  const approvalAllowedResolved = await waitFor(() => got.some((m) => m.kind === 'approval-resolved' && m.rpcId === 'approval-rpc-1' && m.approvalId === 'approval-1' && m.outcome === 'allowed-once'), 2000)
+  const approvalAllowedReady = await waitFor(() => got.some((m) => m.kind === 'approval-response' && m.rpcId === requestedApproval.rpcId), 2000)
+  const approvalAllowedReceipt = got.find((m) => m.kind === 'approval-response' && m.rpcId === requestedApproval.rpcId)
+  interactionResults.push(['approval allowed once', approvalAllowedReady && approvalAllowedReceipt.accepted === true && approvalAllowedReceipt.outcome === 'allowed-once' && await approvalOne === 'allowed-once'])
+  const approvalAllowedResolved = await waitFor(() => got.some((m) => m.kind === 'approval-resolved' && m.rpcId === requestedApproval.rpcId && m.approvalId === requestedApproval.approvalId && m.outcome === 'allowed-once'), 2000)
   interactionResults.push(['approval allowed resolution', approvalAllowedResolved])
 
   ws.send(JSON.stringify({
     type: 'approval-response',
-    rpcId: 'approval-rpc-2',
+    rpcId: requestedApprovalTwo.rpcId,
     sessionId: 's2',
-    approvalId: 'approval-2',
+    approvalId: requestedApprovalTwo.approvalId,
     outcome: 'rejected',
   }))
-  const approvalRejectedReady = await waitFor(() => got.some((m) => m.kind === 'approval-response' && m.rpcId === 'approval-rpc-2'), 2000)
-  const approvalRejectedReceipt = got.find((m) => m.kind === 'approval-response' && m.rpcId === 'approval-rpc-2')
-  interactionResults.push(['approval rejected', approvalRejectedReady && approvalRejectedReceipt.accepted === true && approvalRejectedReceipt.outcome === 'rejected'])
-  const approvalRejectedResolved = await waitFor(() => got.some((m) => m.kind === 'approval-resolved' && m.rpcId === 'approval-rpc-2' && m.approvalId === 'approval-2' && m.outcome === 'rejected'), 2000)
+  const approvalRejectedReady = await waitFor(() => got.some((m) => m.kind === 'approval-response' && m.rpcId === requestedApprovalTwo.rpcId), 2000)
+  const approvalRejectedReceipt = got.find((m) => m.kind === 'approval-response' && m.rpcId === requestedApprovalTwo.rpcId)
+  interactionResults.push(['approval rejected', approvalRejectedReady && approvalRejectedReceipt.accepted === true && approvalRejectedReceipt.outcome === 'rejected' && await approvalTwo === 'rejected'])
+  const approvalRejectedResolved = await waitFor(() => got.some((m) => m.kind === 'approval-resolved' && m.rpcId === requestedApprovalTwo.rpcId && m.approvalId === requestedApprovalTwo.approvalId && m.outcome === 'rejected'), 2000)
   interactionResults.push(['approval rejected resolution', approvalRejectedResolved])
 
-  ws.send(JSON.stringify({ type: 'approval-response', rpcId: 'approval-rpc-2', sessionId: 's2', approvalId: 'approval-2', outcome: 'later' }))
+  ws.send(JSON.stringify({ type: 'approval-response', rpcId: requestedApprovalTwo.rpcId, sessionId: 's2', approvalId: requestedApprovalTwo.approvalId, outcome: 'later' }))
   const badApprovalReady = await waitFor(() => got.some((m) => m.kind === 'error' && m.requestType === 'approval-response'), 2000)
   interactionResults.push(['approval invalid outcome', badApprovalReady])
 
-  api._muxFrames.push({
-    rpcId: 'projection-todos',
-    payload: {
-      type: 'session/projection',
+  controlFrames.push({
+      type: 'projection',
       sessionId: 's1',
       key: 'todos',
       value: [{ content: 'Inspect Android CLI/SDK environment', status: 'completed' }],
       seq: 93,
-    },
   })
-  api._muxFrames.push({
-    rpcId: 'projection-goal',
-    payload: {
-      type: 'session/projection',
+  controlFrames.push({
+      type: 'projection',
       sessionId: 's1',
       key: 'goal',
       value: { goal: { id: 'goal-1', revision: 8, objective: '初始化一个 Android app', phase: 'paused', maxGoalRounds: 12 }, roundsStarted: 3, createdAt: 1, updatedAt: 3 },
       seq: 94,
-    },
   })
   const tasksUpdated = await waitFor(() => got.some((m) => m.kind === 'tasks-updated' && m.asOfSeq === 93), 2000)
   const goalUpdated = await waitFor(() => got.some((m) => m.kind === 'goal-updated' && m.asOfSeq === 94), 2000)
@@ -407,12 +417,12 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
   const symlinkPathReady = await waitFor(() => got.some((m) => m.kind === 'error' && m.requestType === 'file-download-open' && m.code === 'file-not-allowed'), 2000)
   interactionResults.push(['file download rejects escaping symlink', symlinkPathReady])
 
-  ws.send(JSON.stringify({ type: 'question-cancel', rpcId: 'question-rpc-2', sessionId: 's2' }))
-  const cancelReady = await waitFor(() => got.some((m) => m.kind === 'question-response' && m.rpcId === 'question-rpc-2'), 2000)
-  const cancelReceipt = got.find((m) => m.kind === 'question-response' && m.rpcId === 'question-rpc-2')
-  const cancelCall = api.respondCalls.find((m) => m.rpcId === 'question-rpc-2')
-  interactionResults.push(['question cancel', cancelReady && cancelReceipt.accepted === true && cancelCall.result.ok === false && cancelCall.result.error.code === 'cancelled'])
-  const cancelledResolved = await waitFor(() => got.some((m) => m.kind === 'question-resolved' && m.rpcId === 'question-rpc-2' && m.outcome === 'cancelled'), 2000)
+  ws.send(JSON.stringify({ type: 'question-cancel', rpcId: requestedTwo.rpcId, sessionId: 's2' }))
+  const cancelReady = await waitFor(() => got.some((m) => m.kind === 'question-response' && m.rpcId === requestedTwo.rpcId), 2000)
+  const cancelReceipt = got.find((m) => m.kind === 'question-response' && m.rpcId === requestedTwo.rpcId)
+  const cancelError = await questionTwo
+  interactionResults.push(['question cancel', cancelReady && cancelReceipt.accepted === true && cancelError.code === 'ASK_CANCELLED'])
+  const cancelledResolved = await waitFor(() => got.some((m) => m.kind === 'question-resolved' && m.rpcId === requestedTwo.rpcId && m.outcome === 'cancelled'), 2000)
   interactionResults.push(['question cancelled resolution', cancelledResolved])
   listeners['session/event']({ id: 's1' }, {
     type: 'user/message',

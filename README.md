@@ -6,7 +6,15 @@
 
 DeepSeek Harness 的设备鉴权移动网关，支持会话与实时事件、任务列表和当前 Goal 同步及管理、服务端驱动的命令和技能菜单、Human-in-the-loop、图片及文件传输。安装后，Harness WebUI 左侧边栏会出现“移动设备”入口，可直接开启网关、生成配对二维码和管理可信设备。
 
-> v0.7.0：移动端现可与 WebUI 对齐展示任务列表和当前 Goal；支持 Goal 改名、暂停、继续和删除，并通过实时 projection 与 revision 校验处理多设备并发更新。
+> v0.7.1：适配 DSH v0.1.2-rc.1 Remote Gateway，移除 APIProxy 依赖；移动端协议和现有功能保持兼容。
+
+## 协议与 DSH 兼容层
+
+移动端连接的是本项目维护的 `dsh-mobile-v1`，不是 DSH 的内部 Remote 协议。插件内部通过独立 Host Adapter 对接 DSH v0.1.2-rc.1 的 Remote Gateway；Session、Workspace、Settings、Commands、Goals 等 namespace 和严格参数只存在于该适配层。
+
+因此本次从旧 APIProxy 迁移到 Remote Gateway 不要求现有移动端修改：WebSocket 子协议、`hello.protocol = 3`、配对鉴权和已有请求/响应字段保持不变。以后 DSH 调整 Remote API 时，优先只更新插件适配层及契约测试；只有移动协议本身发生不可兼容变化时，才会新增并并行支持新的移动端协议版本。
+
+详细实施边界见 [Remote Gateway 重构实施计划](docs/remote-gateway-refactor-plan.md)。
 
 - WebSocket：`/ws/mobile`
 - 局域网：`ws://<局域网 IP>:3081/ws/mobile`

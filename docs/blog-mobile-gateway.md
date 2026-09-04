@@ -379,7 +379,7 @@ DSH 用 Cordis 的依赖注入容器编排"服务行"。插件通过 `package.js
 const plugin = {
   name: 'mobile-gateway',
   Config,
-  inject: ['webServer', 'apiProxy', 'typertGateway', 'agentDefaultModel'],
+  inject: ['webServer', 'typertGateway', 'agentDefaultModel'],
   apply(ctx, config) { /* ... */ },
 }
 ```
