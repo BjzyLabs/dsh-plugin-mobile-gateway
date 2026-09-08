@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-mobile-gateway",
-  "version": "0.7.1",
-  "description": "Secure mobile gateway for DeepSeek Harness with realtime sessions, tasks, goals, commands, approvals, and file transfers",
+  "version": "0.7.2",
+  "description": "Secure mobile gateway for DeepSeek Harness with split realtime/control channels, editable queues, stop/resume, archive/rename sync, tasks, goals, commands, approvals, and file transfers",
   "main": "lib/index.mjs",
   "files": [
     "bin",

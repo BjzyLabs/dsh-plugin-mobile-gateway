@@ -94,6 +94,39 @@ const promptCall = calls.find((call) => call.namespace === 'session' && call.met
 assert.equal(typeof promptCall.args.request.requestId, 'string')
 assert.equal(promptCall.args.request.sessionId, 's1')
 
+assert.deepEqual(await host.sessions.cancel({ sessionId: 's1' }), { accepted: true })
+const cancelCall = calls.find((call) => call.namespace === 'session' && call.method === 'cancel')
+assert.deepEqual(cancelCall.args, { request: { sessionId: 's1' } })
+
+assert.deepEqual(await host.sessions.updateQueue({
+  sessionId: 's1',
+  itemId: 'message-1',
+  action: { kind: 'edit', content: [{ type: 'text', text: '修改后' }] },
+}), { accepted: true })
+const updateQueueCall = calls.find((call) => call.namespace === 'session' && call.method === 'updateQueue')
+assert.deepEqual(updateQueueCall.args, {
+  request: {
+    sessionId: 's1',
+    itemId: 'message-1',
+    action: { kind: 'edit', content: [{ type: 'text', text: '修改后' }] },
+  },
+})
+
+assert.deepEqual(await host.sessions.rename({ sessionId: 's1', title: '新名称' }), { accepted: true })
+const renameCall = calls.find((call) => call.namespace === 'session' && call.method === 'rename')
+assert.deepEqual(renameCall.args, { request: { sessionId: 's1', title: '新名称' } })
+
+assert.deepEqual(await host.workspace.archiveSession({ sessionId: 's1' }), { accepted: true })
+const archiveCall = calls.find((call) => call.namespace === 'workspace' && call.method === 'archiveSession')
+assert.deepEqual(archiveCall.args, { request: { sessionId: 's1' } })
+
+const workspaceStreamAbort = new AbortController()
+const workspaceStream = await host.openWorkspaceStream(workspaceStreamAbort.signal)
+const workspaceOpening = await workspaceStream[Symbol.asyncIterator]().next()
+assert.equal(workspaceOpening.value.type, 'baseline')
+assert.ok(calls.some((call) => call.namespace === 'workspace' && call.method === 'follow' && call.signal === workspaceStreamAbort.signal))
+workspaceStreamAbort.abort()
+
 await host.settings.update({ ns: 'permission', patch: { defaultPreset: 'ask' } })
 const settingsCall = calls.find((call) => call.namespace === 'settings' && call.method === 'update')
 assert.deepEqual(settingsCall.args, { ns: 'permission', patch: { defaultPreset: 'ask' } })

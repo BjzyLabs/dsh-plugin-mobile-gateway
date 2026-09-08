@@ -1,6 +1,6 @@
 # dsh Mobile Gateway — WebSocket 协议参考
 
-移动端通过一个经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问与操作审批、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.7.1）。
+移动端通过经过设备鉴权的 WebSocket 连接与 dsh 通信：订阅 agent 实时输出、发送文字和图片、处理 Human-in-the-loop 提问与操作审批、查询会话/工作区/历史、调整会话配置。本协议由持久化插件 `dsh-plugin-mobile-gateway` 实现（v0.7.2）。
 
 - **本机端点**：`ws://127.0.0.1:3080/ws/mobile`（与 dsh web GUI 同端口）
 - **局域网端点**：`ws://<电脑的私有局域网 IP>:3081/ws/mobile`（插件独立监听，只提供经过鉴权的 WebSocket）
@@ -77,7 +77,7 @@ const pairingText = Buffer.from(JSON.stringify(payload), 'utf8').toString('base6
 ```json
 { "kind": "paired", "token": "<长期设备 token>",
   "device": { "id": "...", "name": "iPhone", "createdAt": 1787111700000 } }
-{ "kind": "hello", "protocol": 3, "capabilities": ["images", "commands", "tasks", "goals", "file-downloads"], "authenticated": true,
+{ "kind": "hello", "protocol": 3, "capabilities": ["split-channels", "images", "commands", "tasks", "goals", "session-cancel", "queue-control", "session-archive", "session-rename", "file-downloads"], "authenticated": true,
   "device": { "id": "...", "name": "iPhone" }, "port": 3080, "clients": 1 }
 ```
 
@@ -530,6 +530,73 @@ let image = [
 → { "kind": "sent", "sessionId": "session-abc", "mode": "queue", "command": { "kind": "success", "text": "..." } }   // 斜杠命令时
 ```
 
+### 排队消息同步与修改
+
+`hello.capabilities` 包含 `queue-control` 时，控制连接会收到 Host 当前待处理消息。连接初始化或 Host 控制流重连后，网关发送完整快照：
+
+```json
+{
+  "kind": "session-queues",
+  "queues": {
+    "session-abc": [
+      {
+        "id": "message-1",
+        "placement": "queued",
+        "rpcId": "prompt-1",
+        "message": {
+          "id": "message-1",
+          "content": [{ "type": "text", "text": "稍后处理这件事" }]
+        }
+      }
+    ]
+  }
+}
+```
+
+之后某个 Session 的队列发生变化时，网关发送该 Session 的完整替换值：
+
+```json
+{ "kind": "session-queue", "sessionId": "session-abc", "items": [] }
+```
+
+- `session-queues.queues` 是全量快照，客户端必须整体替换所有 Session 的本地队列；快照里消失的 Session 也要清除。
+- `session-queue.items` 是单个 Session 的全量队列，不能当作追加事件；空数组表示已无待处理消息。
+- `id` 是后续编辑操作使用的 `itemId`。`placement` 为 `queued`（下一回合）、`steering`（当前回合最近的下一步）或 `context`（系统上下文）。
+- `rpcId` 是 Host 的 Prompt 提交标识，网关会原样转发且它可能不存在。当前 `sent` 回执尚未把该值返回给移动端，因此“发送中本地回显与队列项的精确关联”仍是待实现能力。
+
+编辑排队文本：
+
+```json
+{ "type": "queue-update", "sessionId": "session-abc", "itemId": "message-1",
+  "action": "edit", "text": "修改后的消息" }
+→ { "kind": "queue-item-updated", "sessionId": "session-abc", "itemId": "message-1",
+    "action": "edit", "accepted": true }
+```
+
+删除排队项或将下一回合消息立即插入当前回答：
+
+```json
+{ "type": "queue-update", "sessionId": "session-abc", "itemId": "message-1", "action": "remove" }
+{ "type": "queue-update", "sessionId": "session-abc", "itemId": "message-1", "action": "steer" }
+```
+
+`queue-item-updated` 只是 Host 已提交操作的回执，不是队列最终状态。App 应始终以最新的 `session-queue` 更新界面；该推送可能在回执之前或之后到达。编辑只接受非空文本；`steer` 只适用于仍处于 `queued` 且 Session 正在运行的消息。目标已经开始处理或消失时，Host 返回 `session/queue-item-not-found`；当前回合已不能插入时返回 `session/steer-unavailable`。
+
+### 停止当前生成与稍后继续
+
+停止当前 Session 正在执行的 Agent 回合：
+
+```json
+{ "type": "session-cancel", "sessionId": "session-abc" }
+→ { "kind": "session-cancelled", "sessionId": "session-abc", "accepted": true }
+```
+
+- `accepted: true` 表示 Host 已接受取消请求；最终停止状态仍以该 Session 后续实时事件和 `sessions.running` 为准。
+- 取消只停止当前回合，不会删除 Session 历史，也不会清空已经进入 Host inbox 的待处理消息。
+- 稍后继续不需要专用恢复请求。客户端等待 Session 停止后，使用相同 `sessionId` 发送普通 `message` 即可继续已有上下文。
+- 如果 Session 不存在、未附加或属于不能由普通 Session API 控制的子 Agent，服务端返回对应 Host 错误。
+- `session-cancel` 与 `question-cancel` 不同：前者停止整个 Agent 回合，后者只取消一次 `ask_user_question`。
+
 ---
 
 ## 5. 会话与历史查询
@@ -537,6 +604,8 @@ let image = [
 | type | 参数 | 说明 |
 |---|---|---|
 | `sessions` | — | 会话列表（`updatedAt/running/blank/cwd/agentPreset`） |
+| `session-archive` | `sessionId` | 将 Session 加入 Host 的完整归档集合（隐藏但不删除） |
+| `session-rename` | `sessionId`, `title` | 写入用户指定的持久化 Session 名称 |
 | `history` | `sessionId`, `beforeSeq?`, `maxMessages?`, `maxBytes?`, `view?` | 历史事件页（见下） |
 | `attachment` | `sessionId`, `attachmentId` | 读取历史中属于该会话的图片字节 |
 | `file-list` | `sessionId`, `path?`, `requestId?` | 列出会话工作目录内的一层文件与文件夹 |
@@ -548,6 +617,41 @@ let image = [
 | `context-usage` | `sessionId` | token 用量 + 上下文占用投影 |
 | `tasks` | `sessionId` | 当前任务列表（`todos` projection） |
 | `goal` | `sessionId` | 当前目标及其 CAS 版本（`goal` projection） |
+
+### Session 归档与重命名
+
+在 App 端归档 Session：
+
+```json
+{ "type": "session-archive", "sessionId": "session-abc" }
+→ { "kind": "session-archived", "sessionId": "session-abc",
+    "archivedSessionIds": ["session-abc", "session-old"] }
+```
+
+归档仅将 Session 从 Workspace 分组界面隐藏，不会删除历史。`archivedSessionIds` 始终是 Host 确认后的**完整归档集合**，客户端应使用它整体替换本地集合，而不是只追加本次 `sessionId`。
+
+在 App 端重命名 Session：
+
+```json
+{ "type": "session-rename", "sessionId": "session-abc", "title": "新的会话名称" }
+→ { "kind": "session-renamed", "sessionId": "session-abc",
+    "title": "新的会话名称", "seq": 128 }
+```
+
+Host 会规范化并持久化名称；空白名称返回 `bad-request`，超过 Host 限制或规范化后无效的名称返回 Host 的 `session/title-invalid` 错误。
+
+WebUI、App 或其他客户端造成的变化通过以下帧主动推送：
+
+```json
+{ "kind": "session-archives", "archivedSessionIds": ["session-abc"] }
+{ "kind": "session-title-changed", "sessionId": "session-abc",
+  "title": "WebUI 修改后的名称", "seq": 129, "time": 1786937352,
+  "source": { "kind": "user" } }
+```
+
+- `session-archives` 在网关取得 opening baseline 后缓存；新设备连接时会收到当前完整集合，之后每次 WebUI 归档都会收到新的完整集合。
+- `session-title-changed` 是 Session 列表级元数据通知，即使客户端正在 `subscribe` 另一个 Session 也会收到。
+- 同一名称变化仍会作为带序号的普通 `event` 帧发给订阅该 Session 的客户端；客户端可按 `seq` 幂等处理。
 
 ### `history` 详细
 ```json
@@ -872,8 +976,11 @@ WebUI 中的“任务”与“进行中的目标”分别对应 DSH 的 `todos` 
 | kind | 触发时机 |
 |---|---|
 | `paired` | 首次配对成功；仅此一次返回长期设备 token |
-| `hello` | 连接成功：`{ "kind":"hello", "protocol":3, "capabilities":["images","commands","tasks","goals","file-downloads"], "authenticated":true, "port":3080, "clients":1 }` |
+| `hello` | 连接成功：`{ "kind":"hello", "protocol":3, "capabilities":["split-channels","images","commands","tasks","goals","session-cancel","queue-control","session-archive","session-rename","file-downloads"], "authenticated":true, "port":3080, "clients":1 }` |
 | `event` | 任意会话的 agent 输出（见下） |
+| `session-queues` / `session-queue` | Host 队列完整快照 / 单个 Session 队列替换值 |
+| `session-archives` | Host 的完整 Session 归档集合在连接初始化或 WebUI/App 归档后变化 |
+| `session-title-changed` | 任意客户端写入新的持久化 Session 名称 |
 | `tasks-updated` / `goal-updated` | 当前会话的任务列表或目标 projection 发生变化 |
 | `question-requested` / `question-resolved` | Human-in-the-loop 问题请求与最终状态 |
 | `approval-requested` / `approval-resolved` | Human-in-the-loop 操作审批请求与最终状态 |
@@ -888,6 +995,7 @@ WebUI 中的“任务”与“进行中的目标”分别对应 DSH 的 `todos` 
 - `user/message` → `{text, source, images?: ImageAttachmentRef[]}`
 - `assistant/chunk` → `{turn, step, chunkType: text-delta|reasoning-delta|tool-call-delta|usage|finish, text?/tool?/usage?/finish?}`
 - `assistant/message` → `{turn, step, text, reasoning, toolCalls[]}`
+- `session/title` → `{title, source?}`
 - `tool/call` → `{turn, step, callId, name, arguments}`
 - `tool/result` → `{turn, step, callId, isError, preview(≤400字符)}`
 - `turn/start|end` / `step/start|end` → `{turn, step, reason?}`
@@ -926,6 +1034,7 @@ WebUI 中的“任务”与“进行中的目标”分别对应 DSH 的 `todos` 
 
 | 版本 | 新增 |
 |---|---|
+| v0.7.2 | 独立对话/控制连接；空 Session 创建；停止生成与稍后继续；排队消息同步及编辑/删除/Steer；App 归档/重命名 Session；WebUI 归档集合和名称变化实时同步到 App |
 | v0.1.5 | workspace-create / directories / host |
 | v0.1.6 | 修复消息分发器遗漏（host/directories/workspace-create 未路由） |
 | v0.1.7 | models / select-model / permission-options / permission / context-usage |
@@ -954,3 +1063,37 @@ WebUI 中的“任务”与“进行中的目标”分别对应 DSH 的 `todos` 
 ---
 
 *协议与插件源码同源维护：`dsh-plugin-mobile-gateway/lib/index.mjs` 顶部注释即协议摘要。*
+
+### 提前创建空会话
+
+`hello.capabilities` 中的 `session-create` 表示支持发送首条消息前创建会话。
+客户端发送 `{"type":"session-create","requestId":"unique-id","workspaceId":"w1"}`，
+收到 `{"kind":"session-created","requestId":"unique-id","sessionId":"..."}` 后，
+即可使用现有的命令目录、模型和权限接口；该操作不会调用 prompt 或启动 Agent。
+`workspaceId` 与 `cwd` 均可省略，同时提供时优先使用 `workspaceId`。
+失败返回 `kind:error`、`requestType:session-create` 和原始 `requestId`。
+客户端不应自动重试超时的创建请求，以免重复创建会话。
+
+
+### Independent conversation and control connections
+
+A gateway advertising `split-channels` in `hello.capabilities` accepts the optional
+`X-DSH-Channel` upgrade header (`control` or `conversation`). Without this header,
+the connection keeps the legacy behavior. Clients must wait for the control hello
+capability before opening a second connection. Pair only on control; reuse the
+returned device token and device ID for conversation, never reuse a pairing code.
+
+- Conversation: `message`, `history`, `subscribe`, `unsubscribe`; receives their
+  replies and subscribed session events. History and live events share this lane
+  to preserve their ordering.
+- Control: all other requests, including file downloads, rename/archive, session
+  cancellation, permissions, questions and approvals. Global metadata and pending
+  interactions are delivered only to this connection.
+- `ping` is accepted on either connection. A request on the wrong lane receives
+  `error` with code `wrong-channel` and `requestType`.
+
+Each connection has its own WebSocket send queue. A slow conversation receiver
+does not put file responses behind conversation frames. This isolates socket
+queues; the underlying network link and Host resources remain shared. On connection
+failure clients reconnect and authenticate both lanes, then resubscribe and catch up
+history. Older gateways without the capability continue using one connection.

@@ -7,6 +7,24 @@ const os = require('node:os')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const plugin = (await import('../lib/index.mjs')).default
+const { handleQuery } = await import('../lib/index.mjs')
+const assert = await import('node:assert/strict')
+{
+  const calls = []
+  const api = { sessions: {
+    create: async (payload) => { calls.push(payload); return { sessionId: 'empty-1' } },
+    prompt: () => { throw new Error('Empty creation must never start an agent turn') },
+  } }
+  const created = await handleQuery(api, null, null, { type: 'session-create', requestId: 'r1', workspaceId: ' w1 ', cwd: '/ignored' })
+  assert.deepEqual(created, { kind: 'session-created', sessionId: 'empty-1', requestId: 'r1' })
+  assert.deepEqual(calls, [{ workspaceId: 'w1' }])
+  api.sessions.create = async () => { throw new Error('creation failed') }
+  const failed = await handleQuery(api, null, null, { type: 'session-create', requestId: 'r2' })
+  assert.equal(failed.kind, 'error')
+  assert.equal(failed.requestType, 'session-create')
+  assert.equal(failed.requestId, 'r2')
+}
+
 const directoryTestRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-directory-'))
 const fileDownloadRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-files-'))
 const fileDownloadDir = path.join(fileDownloadRoot, 'builds')
@@ -29,6 +47,10 @@ const webServer = {
 function fakeApi() {
   const promptCalls = []
   const createCalls = []
+  const cancelCalls = []
+  const queueUpdateCalls = []
+  const archiveCalls = []
+  const renameCalls = []
   const settingsUpdates = []
   const goalCalls = []
   const imageAttachment = {
@@ -48,6 +70,10 @@ function fakeApi() {
   }
   return {
     promptCalls,
+    cancelCalls,
+    queueUpdateCalls,
+    archiveCalls,
+    renameCalls,
     settingsUpdates,
     goalCalls,
     get _createCalls() { return createCalls },
@@ -77,6 +103,10 @@ function fakeApi() {
     workspace: {
       async list() { return { rpcId: 'r', result: { ok: true, value: { items: [], archivedSessionIds: [] } } } },
       async create() { return { rpcId: 'r', result: { ok: true, value: { workspace: { workspaceId: 'w', path: '/tmp', title: 't', sessionIds: [], createdAt: 'c', updatedAt: 'u' }, created: true } } } },
+      async archiveSession(req) {
+        archiveCalls.push(req.payload)
+        return { rpcId: 'r', result: { ok: true, value: { archivedSessionIds: [req.payload.sessionId] } } }
+      },
     },
     settings: {
       async describe() { return { rpcId: 'r', result: { ok: true, value: { writable: true, hasDocument: false, namespaces: [
@@ -133,6 +163,12 @@ function fakeApi() {
       async prompt(req) { promptCalls.push(req.payload); return { rpcId: 'r', result: { ok: true, value: { accepted: true, command: { kind: 'success', text: 'switched to ' + (req.payload.content[0].text) } } } } },
       async create(req) { createCalls.push(req.payload); return { rpcId: 'r', result: { ok: true, value: { sessionId: 's-new-' + createCalls.length } } } },
       async fork(req) { return { rpcId: 'r', result: { ok: true, value: { sessionId: 's-branch-1' } } } },
+      async cancel(req) { cancelCalls.push(req.payload); return { rpcId: 'r', result: { ok: true, value: { accepted: true } } } },
+      async updateQueue(req) { queueUpdateCalls.push(req.payload); return { rpcId: 'r', result: { ok: true, value: { accepted: true } } } },
+      async rename(req) {
+        renameCalls.push(req.payload)
+        return { rpcId: 'r', result: { ok: true, value: { title: req.payload.title.trim(), seq: 95 } } }
+      },
     },
   }
 }
@@ -145,6 +181,7 @@ const ctx = {
 ctx.webServer = webServer
 const invokeCalls = []
 const controlFrames = []
+const workspaceFrames = []
 const savedSelections = []
 ctx.agentDefaultModel = {
   currentSelection() { return { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' } },
@@ -179,6 +216,9 @@ ctx.typertGateway = {
       }
       if (req.method === 'attachment') return unwrap(api.sessions.attachment)
       if (req.method === 'fork') return unwrap(api.sessions.fork)
+      if (req.method === 'cancel') return unwrap(api.sessions.cancel)
+      if (req.method === 'updateQueue') return unwrap(api.sessions.updateQueue)
+      if (req.method === 'rename') return unwrap(api.sessions.rename)
       if (req.method === 'selectModel') return unwrap(api.sessions.selectModel)
       if (req.method === 'modelCatalog') {
         const catalog = await unwrap(api.sessions.models, {})
@@ -192,6 +232,7 @@ ctx.typertGateway = {
       if (req.method === 'canOpenWorkspacePath') return true
     }
     if (req.namespace === 'workspace' && req.method === 'create') return unwrap(api.workspace.create)
+    if (req.namespace === 'workspace' && req.method === 'archiveSession') return unwrap(api.workspace.archiveSession)
     if (req.namespace === 'settings' && req.method === 'describe') return unwrap(api.settings.describe, {})
     if (req.namespace === 'settings' && req.method === 'update') {
       return unwrap(api.settings.update, { ns: req.args.ns, patch: req.args.patch })
@@ -213,7 +254,13 @@ ctx.typertGateway = {
   async stream(req) {
     if (req.namespace === 'workspace' && req.method === 'follow') {
       const value = (await api.workspace.list()).result.value
-      return (async function* () { yield { type: 'baseline', value } })()
+      return (async function* () {
+        yield { type: 'baseline', value }
+        while (!req.signal.aborted) {
+          if (workspaceFrames.length > 0) yield workspaceFrames.shift()
+          else await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      })()
     }
     if (req.namespace === 'session' && req.method === 'follow') {
       const value = (await api.sessions.history()).result.value
@@ -224,7 +271,16 @@ ctx.typertGateway = {
     }
     if (req.namespace === 'session' && req.method === 'control') {
       return (async function* () {
-        yield { type: 'baseline', value: { queues: {}, jobs: {}, projections: {} } }
+        yield {
+          type: 'baseline',
+          value: {
+            queues: {
+              s1: [{ id: 'message-1', placement: 'queued', rpcId: 'prompt-1', message: { id: 'message-1', content: [{ type: 'text', text: '原消息' }] } }],
+            },
+            jobs: {},
+            projections: {},
+          },
+        }
         while (!req.signal.aborted) {
           if (controlFrames.length > 0) yield controlFrames.shift()
           else await new Promise((resolve) => setTimeout(resolve, 5))
@@ -253,6 +309,46 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
   await waitFor(() => got.length > 0, 2000)
 
   const interactionResults = []
+  // 两条真实 WebSocket：暂停对话接收后，控制连接仍能读取文件并管理会话。
+  {
+    const control = new WebSocket(`ws://127.0.0.1:${webServer.port}/ws/mobile`, { headers: { 'X-DSH-Channel': 'control' } })
+    const conversation = new WebSocket(`ws://127.0.0.1:${webServer.port}/ws/mobile`, { headers: { 'X-DSH-Channel': 'conversation' } })
+    const controls = []
+    const conversations = []
+    control.on('message', data => controls.push(JSON.parse(data.toString())))
+    conversation.on('message', data => conversations.push(JSON.parse(data.toString())))
+    try {
+      assert.equal(await waitFor(() => controls.some(f => f.kind === 'hello') && conversations.some(f => f.kind === 'hello'), 2000), true)
+      assert.equal(controls.find(f => f.kind === 'hello').capabilities.includes('split-channels'), true)
+      conversation.send(JSON.stringify({ type: 'subscribe', sessionId: 's1' }))
+      assert.equal(await waitFor(() => conversations.some(f => f.kind === 'subscribed'), 2000), true)
+      listeners['session/event']({ id: 's1' }, { type: 'session/title', seq: 7001, time: Date.now(), data: { title: 'split test' } })
+      assert.equal(await waitFor(() => controls.some(f => f.kind === 'session-title-changed') && conversations.some(f => f.seq === 7001), 2000), true)
+      assert.equal(controls.some(f => f.seq === 7001 && f.event), false)
+      assert.equal(conversations.some(f => f.kind === 'session-title-changed' || f.kind === 'session-archives'), false)
+      conversation.pause()
+      for (let seq = 7002; seq < 7258; seq++) {
+        listeners['session/event']({ id: 's1' }, { type: 'assistant/chunk', seq, time: Date.now(), data: { text: 'x'.repeat(4096), chunkType: 'text-delta', turn: 1, step: 1 } })
+      }
+      control.send(JSON.stringify({ type: 'file-list', requestId: 'split-files', sessionId: 's1' }))
+      assert.equal(await waitFor(() => controls.some(f => f.kind === 'file-list' && f.requestId === 'split-files'), 2000), true)
+      control.send(JSON.stringify({ type: 'session-rename', sessionId: 's1', title: 'split renamed' }))
+      assert.equal(await waitFor(() => controls.some(f => f.kind === 'session-renamed'), 2000), true)
+      assert.equal(controls.some(f => f.event), false)
+      conversation.resume()
+      conversation.send(JSON.stringify({ type: 'file-list', requestId: 'wrong-lane', sessionId: 's1' }))
+      assert.equal(await waitFor(() => conversations.some(f => f.code === 'wrong-channel'), 2000), true)
+    } finally {
+      conversation.terminate()
+      control.terminate()
+    }
+  }
+
+  const archiveBaselineReady = await waitFor(() => got.some((m) => m.kind === 'session-archives' && m.archivedSessionIds.length === 0), 2000)
+  interactionResults.push(['session archive baseline on connect', archiveBaselineReady])
+  const queueBaselineReady = await waitFor(() => got.some((m) => m.kind === 'session-queues' && m.queues.s1?.[0]?.id === 'message-1'), 2000)
+  const queueBaseline = got.find((m) => m.kind === 'session-queues' && m.queues.s1?.[0]?.id === 'message-1')
+  interactionResults.push(['session queue baseline on connect', queueBaselineReady && queueBaseline.queues.s1[0].placement === 'queued' && queueBaseline.queues.s1[0].message.content[0].text === '原消息'])
   const questionOne = listeners['user-questions/request']({
     agent: { id: 's1' },
     questions: [
@@ -370,10 +466,44 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
       value: { goal: { id: 'goal-1', revision: 8, objective: '初始化一个 Android app', phase: 'paused', maxGoalRounds: 12 }, roundsStarted: 3, createdAt: 1, updatedAt: 3 },
       seq: 94,
   })
+  controlFrames.push({
+    type: 'queue',
+    sessionId: 's1',
+    items: [{ id: 'message-1', placement: 'queued', rpcId: 'prompt-1', message: { id: 'message-1', content: [{ type: 'text', text: 'WebUI 修改后' }] } }],
+  })
   const tasksUpdated = await waitFor(() => got.some((m) => m.kind === 'tasks-updated' && m.asOfSeq === 93), 2000)
   const goalUpdated = await waitFor(() => got.some((m) => m.kind === 'goal-updated' && m.asOfSeq === 94), 2000)
+  const queueUpdated = await waitFor(() => got.some((m) => m.kind === 'session-queue' && m.sessionId === 's1' && m.items[0]?.message.content[0]?.text === 'WebUI 修改后'), 2000)
   interactionResults.push(['live task projection', tasksUpdated && got.find((m) => m.kind === 'tasks-updated' && m.asOfSeq === 93).todos[0].status === 'completed'])
   interactionResults.push(['live goal projection', goalUpdated && got.find((m) => m.kind === 'goal-updated' && m.asOfSeq === 94).goal.goal.phase === 'paused'])
+  interactionResults.push(['live session queue update', queueUpdated])
+
+  workspaceFrames.push({ type: 'archived', archivedSessionIds: ['s1'] })
+  const archivesUpdated = await waitFor(() => got.some((m) => m.kind === 'session-archives' && m.archivedSessionIds.includes('s1')), 2000)
+  interactionResults.push(['live session archive state', archivesUpdated])
+
+  ws.send(JSON.stringify({ type: 'subscribe', sessionId: 's2' }))
+  await waitFor(() => got.some((m) => m.kind === 'subscribed' && m.sessionId === 's2'), 2000)
+  listeners['session/event']({ id: 's1' }, {
+    type: 'session/title',
+    seq: 95,
+    time: 95,
+    data: { title: 'WebUI 新名称', messageSeqs: [], source: { kind: 'user' } },
+  })
+  const titleChanged = await waitFor(() => got.some((m) => m.kind === 'session-title-changed' && m.sessionId === 's1' && m.seq === 95), 2000)
+  const filteredTitleEvent = got.some((m) => m.kind === 'event' && m.sessionId === 's1' && m.seq === 95)
+  interactionResults.push(['live session title metadata ignores conversation filter', titleChanged && !filteredTitleEvent && got.find((m) => m.kind === 'session-title-changed' && m.seq === 95).title === 'WebUI 新名称'])
+  ws.send(JSON.stringify({ type: 'unsubscribe' }))
+  await waitFor(() => got.filter((m) => m.kind === 'subscribed' && m.sessionId === null).length >= 2, 2000)
+  listeners['session/event']({ id: 's1' }, {
+    type: 'session/title',
+    seq: 96,
+    time: 96,
+    data: { title: '第二个名称', messageSeqs: [], source: { kind: 'fallback' } },
+  })
+  const titleEventReady = await waitFor(() => got.some((m) => m.kind === 'event' && m.sessionId === 's1' && m.seq === 96), 2000)
+  const titleEvent = got.find((m) => m.kind === 'event' && m.sessionId === 's1' && m.seq === 96)
+  interactionResults.push(['session title remains in ordered event stream', titleEventReady && titleEvent.event.title === '第二个名称' && titleEvent.event.source.kind === 'fallback'])
 
   ws.send(JSON.stringify({ type: 'file-list', requestId: 'files-1', sessionId: 's1' }))
   const fileListReady = await waitFor(() => got.some((m) => m.kind === 'file-list' && m.requestId === 'files-1'), 2000)
@@ -521,6 +651,8 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
     ['goal-clear', { type: 'goal-clear', sessionId: 's1', ref: { id: 'goal-1', revision: 10 } }, (m) => m.kind === 'goal-clear' && m.cleared === true && api.goalCalls.some((c) => c.method === 'clear')],
     ['goal mutation missing ref', { type: 'goal-pause', sessionId: 's1' }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'goal-pause'],
     ['message keeps slash text as prompt', { type: 'message', sessionId: 's1', text: '/compact' }, (m) => { const p = api.promptCalls[api.promptCalls.length - 1]; return m.kind === 'sent' && p.content.length === 1 && p.content[0].text === '/compact'; }],
+    ['create empty session', { type: 'session-create', requestId: 'create-1', workspaceId: 'w1', cwd: '/ignored' }, (m) => m.kind === 'session-created' && m.requestId === 'create-1' && Boolean(m.sessionId) && JSON.stringify(api._createCalls.at(-1)) === JSON.stringify({ workspaceId: 'w1' })],
+    ['create empty session requires correlation', { type: 'session-create' }, (m) => m.kind === 'error' && m.requestType === 'session-create' && m.code === 'bad-request'],
     ['message create in workspace', { type: 'message', text: 'hi', workspaceId: 'w1' }, (m) => m.kind === 'sent' && api._createCalls.length >= 1 && JSON.stringify(api._createCalls[api._createCalls.length - 1]) === JSON.stringify({ workspaceId: 'w1' })],
     ['message create with cwd', { type: 'message', text: 'hi', cwd: '/tmp' }, (m) => m.kind === 'sent' && JSON.stringify(api._createCalls[api._createCalls.length - 1]) === JSON.stringify({ cwd: '/tmp' })],
     ['message create both -> workspaceId wins', { type: 'message', text: 'hi', workspaceId: 'w2', cwd: '/tmp' }, (m) => m.kind === 'sent' && JSON.stringify(api._createCalls[api._createCalls.length - 1]) === JSON.stringify({ workspaceId: 'w2' })],
@@ -538,6 +670,20 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
     ['save-default-model missing fields', { type: 'save-default-model', provider: 'deepseek' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
     ['fork', { type: 'fork', sessionId: 's1', atSeq: 42 }, (m) => m.kind === 'fork' && m.sessionId === 's-branch-1'],
     ['fork missing sessionId', { type: 'fork' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
+    ['session cancel', { type: 'session-cancel', sessionId: 's1' }, (m) => m.kind === 'session-cancelled' && m.sessionId === 's1' && m.accepted === true && api.cancelCalls.some((call) => call.sessionId === 's1')],
+    ['session cancel missing sessionId', { type: 'session-cancel' }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'session-cancel'],
+    ['continue after session cancel', { type: 'message', sessionId: 's1', text: '继续' }, (m) => { const p = api.promptCalls[api.promptCalls.length - 1]; return m.kind === 'sent' && m.sessionId === 's1' && p.sessionId === 's1' && p.content[0].text === '继续'; }],
+    ['queue edit', { type: 'queue-update', sessionId: 's1', itemId: 'message-1', action: 'edit', text: ' 修改后的消息 ' }, (m) => { const p = api.queueUpdateCalls.at(-1); return m.kind === 'queue-item-updated' && m.accepted === true && m.action === 'edit' && p.itemId === 'message-1' && p.action.kind === 'edit' && p.action.content[0].text === ' 修改后的消息 '; }],
+    ['queue remove', { type: 'queue-update', sessionId: 's1', itemId: 'message-2', action: 'remove' }, (m) => { const p = api.queueUpdateCalls.at(-1); return m.kind === 'queue-item-updated' && m.action === 'remove' && p.action.kind === 'remove'; }],
+    ['queue steer', { type: 'queue-update', sessionId: 's1', itemId: 'message-3', action: 'steer' }, (m) => { const p = api.queueUpdateCalls.at(-1); return m.kind === 'queue-item-updated' && m.action === 'steer' && p.action.kind === 'steer'; }],
+    ['queue edit empty text', { type: 'queue-update', sessionId: 's1', itemId: 'message-1', action: 'edit', text: '   ' }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'queue-update'],
+    ['queue update invalid action', { type: 'queue-update', sessionId: 's1', itemId: 'message-1', action: 'later' }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'queue-update'],
+    ['queue update missing itemId', { type: 'queue-update', sessionId: 's1', action: 'remove' }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'queue-update'],
+    ['session archive', { type: 'session-archive', sessionId: 's1' }, (m) => m.kind === 'session-archived' && m.sessionId === 's1' && m.archivedSessionIds.includes('s1') && api.archiveCalls.some((call) => call.sessionId === 's1')],
+    ['session archive missing sessionId', { type: 'session-archive' }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'session-archive'],
+    ['session rename', { type: 'session-rename', sessionId: 's1', title: ' App 新名称 ' }, (m) => m.kind === 'session-renamed' && m.sessionId === 's1' && m.title === 'App 新名称' && m.seq === 95 && api.renameCalls.some((call) => call.sessionId === 's1' && call.title === ' App 新名称 ')],
+    ['session rename empty title', { type: 'session-rename', sessionId: 's1', title: '   ' }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'session-rename'],
+    ['session rename missing sessionId', { type: 'session-rename', title: '新名称' }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'session-rename'],
     ['models global (no sessionId)', { type: 'models' }, (m) => m.kind === 'models' && m.groups.length === 1 && m.groups[0].models[0].id === 'deepseek-chat' && m.current === undefined],
     ['providers', { type: 'providers' }, (m) => m.kind === 'providers' && m.providers[0].provider === 'deepseek'],
     ['missing sessionId', { type: 'history' }, (m) => m.kind === 'error' && m.code === 'bad-request'],

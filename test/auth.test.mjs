@@ -95,6 +95,10 @@ function expectRejected(url, options = {}) {
       async invoke() { throw new Error('unexpected Remote invocation') },
       async stream(request) {
         return (async function* () {
+          if (request.namespace === 'workspace' && request.method === 'follow') {
+            yield { type: 'baseline', value: { items: [], archivedSessionIds: [] } }
+            while (!request.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 5))
+          }
           if (request.namespace === 'session' && request.method === 'control') {
             yield { type: 'baseline', value: { queues: {}, jobs: {}, projections: {} } }
             while (!request.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 5))
@@ -232,7 +236,19 @@ function expectRejected(url, options = {}) {
   assert.equal(pairedSocket.protocol, 'dsh-mobile-v1')
   assert.equal(hello.authenticated, true)
   assert.equal(hello.protocol, 3)
-  assert.deepEqual(hello.capabilities, ['images', 'commands', 'tasks', 'goals', 'file-downloads'])
+  assert.deepEqual(hello.capabilities, [
+    'split-channels',
+    'images',
+    'session-create',
+    'commands',
+    'tasks',
+    'goals',
+    'session-cancel',
+    'queue-control',
+    'session-archive',
+    'session-rename',
+    'file-downloads',
+  ])
   const connectedStatus = await (await fetch(`${base}/mgw/status`)).json()
   assert.equal(connectedStatus.gatewayEnabled, true)
   assert.equal(connectedStatus.waitExpiresAt, null)
