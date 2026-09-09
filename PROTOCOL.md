@@ -46,7 +46,9 @@ WebUI 中有两个互相独立的开关。它们是本机管理设置，iOS 客�
 | 开启 | 开启（默认） | 必须使用一次性配对码或长期设备 token，否则返回 `401 Unauthorized` |
 | 开启 | 关闭（仅 Debug） | 仅 DSH 本机监听允许无凭证连接，`hello.authenticated` 为 `false`；独立局域网监听仍返回 `401` |
 
-- 移动网关默认关闭。手动开启后，默认 5 分钟内没有客户端成功建立连接就自动关闭。
+- 未保存用户选择且未显式配置时，移动网关默认关闭。管理界面支持关闭、临时开启、常驻开启，选择会持久化。
+- 临时开启后默认 5 分钟内没有客户端成功建立连接才自动关闭；成功连接后本次运行保持开启，重启重新计时。常驻开启没有该计时器。
+- 启动优先级为持久化选择 > `gatewayMode` > 旧 `gatewayEnabled`；旧配置 true 映射常驻，false 映射关闭。
 - 关闭移动网关会关闭现有连接，WebSocket close code 为 `4004`。
 - 从 Debug 模式重新开启鉴权时，所有无凭证连接会被关闭，close code 为 `4003`。
 - Debug 鉴权开关只影响 DSH 自带的本机监听，并且只在当前 DSH 进程中生效；独立局域网监听始终强制设备鉴权。
@@ -87,6 +89,26 @@ const pairingText = Buffer.from(JSON.stringify(payload), 'utf8').toString('base6
 - WebSocket 子协议：`dsh-mobile-v1, dsh-auth.<token>`
 
 长期 token 默认禁止放在 URL query 中，避免被代理日志、浏览器历史和监控系统记录。缺少凭证、凭证无效、配对码过期或重复使用时，HTTP Upgrade 返回 `401 Unauthorized`。
+
+#### 多网关身份扩展（当前源码，尚未发布新版本）
+
+保持配对 `version: 2`、子协议 `dsh-mobile-v1` 和 `hello.protocol: 3`。以下新增字段不改变已有业务帧语义：
+
+| 新字段 | 返回位置 | 约定 |
+|---|---|---|
+| `gatewayId` | 配对载荷、`paired`、`hello`、`GET /mgw/status` | 持久化 UUID v4；同一网关各访问地址、双通道及重启前后相同 |
+| `gatewayName` | 同上 | 展示名称，允许改变，不能作为身份或鉴权依据 |
+| `endpoints` | 配对载荷、`GET /mgw/status` | 规范化去重的 URL 字符串数组；不在 `hello` 或 `paired` 返回 |
+
+配对仍保留 `publicUrl`，且它排在本次 `endpoints` 第一项。其后按本机配对请求 `endpoints`、插件配置 `endpoints`、公网配置、已监听 LAN 地址的顺序合并。每个输入列表及合并结果最多 16 项，每项最多 2048 字符。允许 HTTP(S) 输入并转为 WS(S)，拒绝凭证、query、fragment、未指定监听地址及公网明文 WS。
+
+`POST /mgw/pair` 可额外传入 `endpoints: string[]`，只用于本次配对，不写入配置。移动端对新地址必须在发送凭证前建立信任；`hello` 的 ID 校验发生在鉴权后，不能替代 TLS 和地址确认。多个网关的 token 独立签发、保存和撤销；App 以网关连接上下文路由原有业务请求。
+
+本机管理接口 `POST /mgw/gateway` 接受 `{"mode":"disabled|temporary|persistent"}` 中的一个具体值，例如 `{"mode":"persistent"}`。兼容旧 `{"enabled":true}`（临时开启）与 false（关闭）；不能同时传 `mode` 和 `enabled`。返回 `gatewayEnabled`、`gatewayMode`、`waitExpiresAt`、`connectedClients`。参数错误返回 400；保存失败返回 500 且不改变当前运行模式。
+
+`GET /mgw/status` 增加身份、地址列表及 `gatewayMode`。模式的持久化不影响配对码有效期和文件传输超时。自动超时关闭若遇到磁盘写入失败，会保持当前进程关闭并记录错误；重启可能仍按旧保存模式运行，需修复存储后再次保存选择。
+
+完整配对示例、旧 App 迁移、地址信任与错误处理见 [App 对接说明](docs/multi-gateway-app-integration.md)。
 
 #### iOS 对接示例
 

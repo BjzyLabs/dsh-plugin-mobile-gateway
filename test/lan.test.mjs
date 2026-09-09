@@ -125,6 +125,9 @@ async function waitForLanStatus(base) {
   assert.equal(pairResponse.status, 201)
   const pair = await pairResponse.json()
   assert.equal(pair.payload.publicUrl, lanUrl)
+  assert.equal(pair.payload.gatewayId, status.gatewayId)
+  assert.deepEqual(pair.payload.endpoints, [lanUrl])
+  assert.deepEqual(status.endpoints, [lanUrl])
 
   const deviceId = '7bb30e78-4a31-4478-aae1-00a41d280637'
   const ws = new WebSocket(
@@ -140,6 +143,18 @@ async function waitForLanStatus(base) {
   assert.equal(hello.authenticated, true)
   assert.equal(hello.port, status.lan.port)
   assert.equal(typeof paired.token, 'string')
+  assert.equal(paired.gatewayId, status.gatewayId)
+  assert.equal(hello.gatewayId, status.gatewayId)
+
+  // A token paired through LAN identifies the same gateway on the host listener.
+  const main = new WebSocket(`ws://127.0.0.1:${webServer.port}/ws/mobile`, {
+    headers: { Authorization: `Bearer ${paired.token}`, 'X-DSH-Device-ID': deviceId },
+  })
+  const mainHelloPromise = waitForMessage(main, 'hello')
+  await once(main, 'open')
+  assert.equal((await mainHelloPromise).gatewayId, hello.gatewayId)
+  main.close()
+  await once(main, 'close')
 
   ws.close()
   await once(ws, 'close')
