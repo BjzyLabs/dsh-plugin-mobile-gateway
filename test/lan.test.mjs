@@ -109,7 +109,7 @@ async function waitForLanStatus(base) {
   assert.equal(status.lan.enabled, true)
   assert.equal(status.lan.listening, true)
   assert.equal(status.lan.requireAuth, true)
-  assert.equal(status.tailnetTransportAllowed, true, 'the opt-in is reported in status')
+  assert.equal(status.allowTailnetTransport, true, 'status echoes the opt-in')
   assert.equal(status.lan.error, null)
   assert.equal(status.lan.urls.length, 1)
   const lanUrl = status.lan.urls[0]

@@ -129,7 +129,7 @@ function expectRejected(url, options = {}) {
   assert.equal(initialStatus.version, JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version)
   assert.equal(initialStatus.publicUrl, 'wss://203.0.113.10/ws/mobile')
   assert.equal(initialStatus.webPort, webServer.port)
-  assert.equal(initialStatus.tailnetTransportAllowed, false, 'tailnet transport stays off unless the operator opts in')
+  assert.equal(initialStatus.allowTailnetTransport, false, 'ws:// on the tailnet stays off unless the operator opts in')
   const helperStatus = await (await fetch(`${base}/mgw/public-setup`)).json()
   assert.equal(helperStatus.installed, false)
 
