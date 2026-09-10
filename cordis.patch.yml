@@ -9,6 +9,14 @@
         # Secure by default: every mobile WebSocket must authenticate with a
         # paired device credential. Pair/revoke APIs remain local-machine only.
         gatewayEnabled: false
+        # Optional startup mode: disabled | temporary | persistent.
+        # Saved management-UI choices take precedence over startup config.
+        # gatewayMode: persistent
+        # gatewayName: Home PC
+        # gatewayStateFile: /path/to/instance-gateway.json
+        # Optional additional reachable addresses for this SAME gateway:
+        # endpoints:
+        #   - wss://gateway.example.com/ws/mobile
         gatewayWaitTimeoutMs: 300000
         requireAuth: true
         adminLoopbackOnly: true
