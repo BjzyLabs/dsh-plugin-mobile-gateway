@@ -200,6 +200,15 @@ ctx.typertGateway = {
     if (req.namespace === 'commands' && req.args && req.args.line === '/permission missing') {
       throw { code: 'unknown-command', message: 'no such command' }
     }
+    // Pre-0.1.5 hosts take the attachment list as `images` and reject the newer
+    // `submittedAttachments` field outright, the way the Typert descriptor does.
+    if (req.namespace === 'commands' && req.args && req.args.line === '/plan legacy-field'
+        && 'submittedAttachments' in req.args) {
+      throw {
+        code: 'gateway/arguments-invalid',
+        message: 'typert gateway: commands/execute: args fields do not match the descriptor: missing "images"; unexpected "submittedAttachments"',
+      }
+    }
     if (req.namespace === 'commands' && req.args && req.args.line === '/plan fail') {
       return { commandId: 'cmd-error', result: { kind: 'error', text: 'plan failed' } }
     }
@@ -624,8 +633,8 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
     }],
     ['commands English locale', { type: 'commands', sessionId: 's1', locale: 'en-US' }, (m) => m.kind === 'commands' && m.locale === 'en' && m.groups[0].title === 'Commands' && m.groups[1].title === 'Skills' && m.groups[0].items[2].ui.displayHint === 'describe your task to generate plan' && m.groups[1].items[1].description.startsWith('user-only · ')],
     ['commands missing sessionId', { type: 'commands' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
-    ['command-execute compact', { type: 'command-execute', sessionId: 's1', line: '/compact' }, (m) => m.kind === 'command-executed' && m.commandId === 'cmd-1' && m.line === '/compact' && m.result.kind === 'success' && api.promptCalls.length === 0 && invokeCalls.some((c) => c.namespace === 'commands' && c.method === 'execute' && c.args.agentId === 's1' && c.args.line === '/compact' && Array.isArray(c.args.images) && c.args.images.length === 0)],
-    ['command-execute plan args + image', { type: 'command-execute', sessionId: 's1', line: '/plan 帮我完成 Android 端适配', images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=' }] }, (m) => m.kind === 'command-executed' && invokeCalls.some((c) => c.method === 'execute' && c.args.line === '/plan 帮我完成 Android 端适配' && c.args.images.length === 1 && c.args.images[0].data === 'iVBORw0KGgo=') && api.promptCalls.length === 0],
+    ['command-execute compact', { type: 'command-execute', sessionId: 's1', line: '/compact' }, (m) => m.kind === 'command-executed' && m.commandId === 'cmd-1' && m.line === '/compact' && m.result.kind === 'success' && api.promptCalls.length === 0 && invokeCalls.some((c) => c.namespace === 'commands' && c.method === 'execute' && c.args.agentId === 's1' && c.args.line === '/compact' && Array.isArray(c.args.submittedAttachments) && c.args.submittedAttachments.length === 0)],
+    ['command-execute plan args + image', { type: 'command-execute', sessionId: 's1', line: '/plan 帮我完成 Android 端适配', images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=' }] }, (m) => m.kind === 'command-executed' && invokeCalls.some((c) => c.method === 'execute' && c.args.line === '/plan 帮我完成 Android 端适配' && c.args.submittedAttachments.length === 1 && c.args.submittedAttachments[0].data === 'iVBORw0KGgo=') && api.promptCalls.length === 0],
     ['command-execute handler error', { type: 'command-execute', sessionId: 's1', line: '/plan fail' }, (m) => m.kind === 'command-executed' && m.commandId === 'cmd-error' && m.result.kind === 'error' && m.result.text === 'plan failed'],
     ['command-execute rejects compact image', { type: 'command-execute', sessionId: 's1', line: '/compact', images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=' }] }, (m) => m.kind === 'error' && m.code === 'bad-request' && m.requestType === 'command-execute'],
     ['command-execute unknown', { type: 'command-execute', sessionId: 's1', line: '/missing' }, (m) => m.kind === 'error' && m.code === 'unknown-command'],
@@ -639,8 +648,13 @@ function waitFor(pred, timeout) { return new Promise((res) => { const t0 = Date.
     ['select-model', { type: 'select-model', sessionId: 's1', provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' }, (m) => m.kind === 'select-model' && m.selected.reasoningEffort === 'high'],
     ['select-model missing field', { type: 'select-model', sessionId: 's1', provider: 'deepseek' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
     ['permission-options', { type: 'permission-options', sessionId: 's1' }, (m) => m.kind === 'permission-options' && m.namespace.ns === 'permission' && m.sessionPermissions && m.sessionPermissions.currentValue === 'ask'],
-    ['permission', { type: 'permission', sessionId: 's1', name: 'code' }, (m) => m.kind === 'permission' && m.set === 'code' && m.commandId === 'cmd-1' && invokeCalls.some((c) => c.namespace === 'commands' && c.method === 'execute' && c.args.line === '/permission code' && c.args.agentId === 's1' && Array.isArray(c.args.images) && c.args.images.length === 0 && !('agent' in c.args)) && api.promptCalls.length === 0],
+    ['permission', { type: 'permission', sessionId: 's1', name: 'code' }, (m) => m.kind === 'permission' && m.set === 'code' && m.commandId === 'cmd-1' && invokeCalls.some((c) => c.namespace === 'commands' && c.method === 'execute' && c.args.line === '/permission code' && c.args.agentId === 's1' && Array.isArray(c.args.submittedAttachments) && c.args.submittedAttachments.length === 0 && !('agent' in c.args)) && api.promptCalls.length === 0],
     ['permission missing name', { type: 'permission', sessionId: 's1' }, (m) => m.kind === 'error' && m.code === 'bad-request'],
+    ['command-execute falls back to the legacy images field', { type: 'command-execute', sessionId: 's1', line: '/plan legacy-field' },
+      (m) => m.kind === 'command-executed' && api.promptCalls.length === 0
+        && invokeCalls.filter((c) => c.method === 'execute' && c.args.line === '/plan legacy-field').length === 2
+        && invokeCalls.some((c) => c.method === 'execute' && c.args.line === '/plan legacy-field' && 'submittedAttachments' in c.args)
+        && invokeCalls.some((c) => c.method === 'execute' && c.args.line === '/plan legacy-field' && Array.isArray(c.args.images) && c.args.images.length === 0)],
     ['permission unknown command', { type: 'permission', sessionId: 's1', name: 'missing' }, (m) => m.kind === 'error' && m.code === 'unknown-command'],
     ['context-usage', { type: 'context-usage', sessionId: 's1' }, (m) => m.kind === 'context-usage' && m.tokenUsage.totals.inputTokens === 10 && m.contextPressure.contextWindow === 128000 && m.asOfSeq === 42],
     ['tasks', { type: 'tasks', sessionId: 's1' }, (m) => m.kind === 'tasks' && m.sessionId === 's1' && m.asOfSeq === 42 && m.todos.length === 3 && m.todos[1].status === 'in_progress'],
