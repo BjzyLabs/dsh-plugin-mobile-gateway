@@ -96,6 +96,9 @@ async function waitForLanStatus(base) {
     lanEnabled: true,
     lanHost: '127.0.0.1',
     lanPort: 0,
+    // Opt-in: with the Tailscale switch ON, plaintext ws:// on tailnet
+    // addresses and MagicDNS names is accepted (the default refuses them).
+    allowTailnetTransport: true,
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -113,6 +116,21 @@ async function waitForLanStatus(base) {
 
   // Main loopback listener follows the debug switch, but LAN never does.
   assert.equal(await expectRejected(lanUrl), 401)
+
+  // allowTailnetTransport: true accepts tailnet endpoints that the default refuses.
+  const tailnetPair = await fetch(`${base}/mgw/pair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base },
+    body: JSON.stringify({ name: 'Tailnet iPhone', publicUrl: 'ws://100.64.0.1:3081/ws/mobile' }),
+  })
+  assert.equal(tailnetPair.status, 201)
+  assert.equal((await tailnetPair.json()).payload.publicUrl, 'ws://100.64.0.1:3081/ws/mobile')
+  const magicDnsPair = await fetch(`${base}/mgw/pair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base },
+    body: JSON.stringify({ name: 'MagicDNS iPhone', publicUrl: 'ws://macbook-pro-14.tail026f6b.ts.net:3081/ws/mobile' }),
+  })
+  assert.equal(magicDnsPair.status, 201)
 
   const lanHttp = await fetch(`http://127.0.0.1:${status.lan.port}/mgw/status`)
   assert.equal(lanHttp.status, 404)

@@ -202,6 +202,26 @@ function expectRejected(url, options = {}) {
   })
   assert.equal(insecurePublic.status, 400)
 
+  // Tailscale uses the RFC 6598 shared range and MagicDNS .ts.net names. Both
+  // are private overlays, but accepting plaintext ws:// there is an explicit
+  // deployment decision: by default they stay refused, exactly as before.
+  const pairOnTailnet = async (publicUrl) => fetch(`${base}/mgw/pair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base },
+    body: JSON.stringify({ name: 'Tailnet iPhone', publicUrl }),
+  })
+  const tailnetDefault = await pairOnTailnet('ws://100.64.0.1:3081/ws/mobile')
+  assert.equal(tailnetDefault.status, 400)
+  assert.match((await tailnetDefault.json()).message, /allowTailnetTransport/)
+  assert.equal((await pairOnTailnet('ws://100.127.255.255:3081/ws/mobile')).status, 400)
+  assert.equal((await pairOnTailnet('ws://macbook-pro-14.tail026f6b.ts.net:3081/ws/mobile')).status, 400)
+  // The boundary just outside 100.64.0.0/10 is not a tailnet address either.
+  assert.equal((await pairOnTailnet('ws://100.128.0.1:3081/ws/mobile')).status, 400)
+  // A lookalike public domain is never treated as a tailnet name.
+  assert.equal((await pairOnTailnet('ws://myhost.ts.net.evil.example:3081/ws/mobile')).status, 400)
+  // wss:// is always acceptable, tailnet or not.
+  assert.equal((await pairOnTailnet('wss://gateway.example.com/ws/mobile')).status, 201)
+
   const pairResponse = await fetch(`${base}/mgw/pair`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: base },
