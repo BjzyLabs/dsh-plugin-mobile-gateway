@@ -6,6 +6,8 @@
 
 DeepSeek Harness 的设备鉴权移动网关，支持会话与实时事件、排队消息同步及编辑/删除/Steer、Session 归档和重命名的双向同步、停止当前生成并稍后继续、任务列表和当前 Goal 同步及管理、服务端驱动的命令和技能菜单、Human-in-the-loop、图片及文件传输。安装后，Harness WebUI 左侧边栏会出现“移动设备”入口，可直接开启网关、生成配对二维码和管理可信设备。
 
+> v0.7.3：优化移动网关运行模式下拉框的箭头间距。
+>
 > v0.7.2：新增独立对话/控制连接、空 Session 创建、停止生成与稍后继续、排队消息同步及编辑/删除/Steer，以及 Session 归档和重命名的双向同步；兼容 DSH v0.1.2-rc.1 与 v0.1.3-alpha.1。
 
 ## 协议与 DSH 兼容层
@@ -20,6 +22,37 @@ DeepSeek Harness 的设备鉴权移动网关，支持会话与实时事件、排
 - 局域网：`ws://<局域网 IP>:3081/ws/mobile`
 - Linux 服务器公网：`wss://<公网 IP>/ws/mobile`
 - 协议文档：[PROTOCOL.md](PROTOCOL.md)
+
+## 多网关第一阶段（当前源码）
+
+插件提供稳定 `gatewayId`、可配置 `gatewayName`、配对候选地址列表，以及可持久化的“关闭 / 临时开启 / 常驻开启”运行模式。一个 App 可以分别配对不同机器上的网关；客户端多网关管理仍需按 [App 对接说明](docs/multi-gateway-app-integration.md) 实现。本次源码尚未发布新的 npm 版本。
+
+在“移动设备”面板选择“常驻开启”，网关会持续接受已授权设备连接，重启后保持。常驻需要 DSH 进程运行、机器未休眠且网络可达，不提供自动发现或网络中转。
+
+部署配置示例（对应 mobile-gateway 插件的 `config`）：
+
+```yaml
+gatewayMode: persistent
+gatewayName: 家里电脑
+requireAuth: true
+endpoints:
+  - wss://gateway.example.com/ws/mobile
+  - ws://192.168.1.10:3081/ws/mobile
+```
+
+运行模式的优先级：**已保存的界面选择 > `gatewayMode` > 旧 `gatewayEnabled`**。没有保存选择时，旧配置 `gatewayEnabled: true` 对应常驻，false 对应关闭。
+
+- 关闭：立即断开移动连接，重启后仍关闭。
+- 临时开启：默认 5 分钟没有设备成功连接则关闭并保存关闭状态；成功连接后本次运行保持开启。若以临时模式重启，则重新开始等待首次连接。`gatewayWaitTimeoutMs` 可配置 30 秒至 30 分钟。
+- 常驻开启：没有无人连接关闭计时器。配对码仍默认 5 分钟过期，文件传输超时等独立规则不变。
+
+状态默认保存到 `<deviceFile>.gateway.json`，通常为 `~/.dsh/mobile-gateway-devices.json.gateway.json`；可通过 `gatewayStateFile` 单独配置。文件包含随机 UUID v4 身份及用户选择，权限为 `0600`，使用同目录临时文件原子替换；损坏时启动报错，不能静默生成新身份。每个运行实例必须使用独立的设备注册文件和状态文件。
+
+升级和迁移机器时应一并保留这两个文件。克隆为新的独立网关时，不复制原实例的状态文件和设备注册文件，让新实例生成新身份并重新配对。不要在运行中删除身份文件来恢复默认模式；如需重新使用启动配置，应停止该实例、备份状态文件、仅将其 `mode` 改为 `null`，保留 `version` 和 `gatewayId` 后重启。
+
+`gatewayName` 最多 80 字符，未设置时使用主机名。`endpoints` 是额外候选地址，最多 16 项，每项最多 2048 字符；配对时还会合并首选地址、公网配置与已监听的 LAN 地址，合并超过 16 项会报错。所有地址必须指向同一网关；不得填写 `0.0.0.0` / `::`。地址需要手机实际可达，公网使用 WSS。
+
+测试结果与人工步骤见 [验收报告](docs/multi-gateway-phase1-acceptance.md)，完成范围见 [多网关待办](docs/multi-gateway-todo.md)。
 
 ## 配套 iOS 客户端
 
@@ -69,7 +102,7 @@ dsh web
 适用于 DSH 电脑和 iPhone 位于同一个可互访的局域网。
 
 1. 打开 WebUI 的“移动设备”。
-2. 开启“允许移动设备连接”。
+2. 将“网关运行模式”设为“常驻开启”（短期配对也可选“临时开启”）。
 3. 保持“设备鉴权”开启。
 4. 确认面板显示 `ws://<电脑局域网 IP>:3081/ws/mobile`。
 5. 填写设备名称并点击“生成配对二维码”。
